@@ -102,6 +102,12 @@ export class DinoRenderer {
     this.hitFlash = 0;
     this.finaleTime = 0;
     this.finaleBurst = false;
+    this.lastMergeId = null;
+    this.lastLossId = null;
+    this.mergeAnim = null;
+    this.cameraLook = new THREE.Vector3();
+    // Team view: camera offsets relative to the leader (tuned in the browser via ?qa).
+    this.teamCam = { x: 20, y: 11.5, z: 1.2, lookY: -4.1, lookZ: -1.6, portraitX: 24, portraitY: 13, portraitZ: 0.4, portraitLookY: -10, portraitLookZ: -0.4 };
     this.currentPalette = PALETTES[0];
     this.geometries = this._createGeometries();
     this.materials = this._createMaterials(this.currentPalette);
@@ -116,6 +122,20 @@ export class DinoRenderer {
 
     this._setupLights();
     this._setupWorld();
+    this.mergeRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.9, 0.09, 8, 36),
+      new THREE.MeshBasicMaterial({ color: 0xffd84a, transparent: true, depthWrite: false })
+    );
+    this.mergeRing.rotation.x = -Math.PI / 2;
+    this.mergeRing.visible = false;
+    this.effectRoot.add(this.mergeRing);
+    // A golden beam of light marks an evolution, visible even from the team camera.
+    this.mergeBeam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.45, 0.7, 1, 16, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xffe27a, transparent: true, depthWrite: false, side: THREE.DoubleSide })
+    );
+    this.mergeBeam.visible = false;
+    this.effectRoot.add(this.mergeBeam);
     this.player = this._createDino({ body: 0x71dc52, belly: 0xd5f59c, spikes: 0xffd744, size: 1 });
     this.world.add(this.player.root);
     this.player.root.rotation.y = 0;
@@ -459,6 +479,11 @@ export class DinoRenderer {
     this.hitFlash = 0;
     this.finaleTime = 0;
     this.finaleBurst = false;
+    this.lastMergeId = null;
+    this.lastLossId = null;
+    this.mergeAnim = null;
+    this.mergeRing.visible = false;
+    this.mergeBeam.visible = false;
     this._clearActiveObjects();
     this._clearEffects();
     this._clearForks();
@@ -563,17 +588,92 @@ export class DinoRenderer {
         }
         this.teamDinos.set(key, dino); this.teamRoot.add(dino.root);
       }
-      const inFork = (this.level?.forks || []).some((fork) => distance >= fork.start && distance <= fork.end);
-      const col = inFork ? 0 : index % 3; const row = inFork ? index : Math.floor(index / 3);
-      const baseX = menu ? -1.8 + col * 1.75 : this._forkX(distance, run.x || 0) + (col - 1) * (inFork ? 0 : 1.14);
-      const baseZ = -distance + (menu ? -1.6 - row * 1.55 : 2.0 + row * 1.42);
+      const { x: baseX, z: baseZ } = this._teamSlot(index, menu, distance, run);
       const flying = Boolean(dino.root.userData.flying);
       dino.root.position.set(baseX, flying ? 1.65 + Math.sin(this.clockTime * 7 + index) * .18 : 0, baseZ);
       dino.root.rotation.y = menu ? Math.PI : 0;
       const size = Number((dinoByTier(tier) || {}).size) || 1;
-      dino.root.scale.setScalar((menu ? .5 : .52) * size);
+      // Evolving: the new dino pops up from small with a little overshoot and a white glow.
+      const merge = this.mergeAnim && this.mergeAnim.slot === index && this.mergeAnim.tier === tier ? this.mergeAnim : null;
+      const pop = merge ? 0.25 + 0.75 * this._easeOutBack(Math.min(1, merge.t / 0.55)) : 1;
+      dino.root.scale.setScalar((menu ? .5 : .52) * size * pop);
+      const glow = merge ? Math.max(0, 1 - merge.t / 0.7) : 0;
+      for (const material of dino.materials || []) {
+        if (!material.emissive) continue;
+        material.emissive.setRGB(1, 0.95, 0.7);
+        material.emissiveIntensity = glow * 0.9;
+      }
       this._animateDino(dino, this.clockTime + index * .33, run.status === 'running' ? .78 : .2);
     });
+  }
+
+  _teamSlot(index, menu, distance, run) {
+    const inFork = (this.level?.forks || []).some((fork) => distance >= fork.start && distance <= fork.end);
+    const col = inFork ? 0 : index % 3;
+    const row = inFork ? index : Math.floor(index / 3);
+    return {
+      x: menu ? -1.8 + col * 1.75 : this._forkX(distance, run.x || 0) + (col - 1) * (inFork ? 0 : 1.14),
+      z: -distance + (menu ? -1.6 - row * 1.55 : 2.0 + row * 1.42),
+    };
+  }
+
+  _easeOutBack(k) {
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    return 1 + c3 * (k - 1) ** 3 + c1 * (k - 1) ** 2;
+  }
+
+  // Merges and trap losses come from the engine as numbered records; each new one plays once.
+  _updateTeamEffects(run, dt) {
+    const distance = run.distance || 0;
+    const merge = run.lastMerge;
+    if (merge && merge.id !== this.lastMergeId) {
+      this.lastMergeId = merge.id;
+      this.mergeAnim = { slot: merge.slot, tier: merge.tier, t: 0 };
+      const at = this._teamSlot(merge.slot, false, distance, run);
+      this._burstAt(at.x, 0.7, at.z, [0xffd84a, 0xffffff, 0x7dffa0], 28, 2.4, 1.8);
+      if (merge.removed >= 0) {
+        const from = this._teamSlot(merge.removed, false, distance, run);
+        this._burstAt(from.x, 0.6, from.z, [0xffffff, 0xffe9a8], 12, 1.2, 1.4);
+      }
+      this.mergeRing.position.set(at.x, 0.08, at.z);
+      this.mergeBeam.position.set(at.x, 0, at.z);
+    }
+    if (this.mergeAnim) {
+      this.mergeAnim.t += dt;
+      const k = Math.min(1, this.mergeAnim.t / 0.8);
+      this.mergeRing.visible = k < 1;
+      this.mergeRing.scale.setScalar(0.5 + k * 3.4);
+      this.mergeRing.material.opacity = 1 - k;
+      this.mergeBeam.visible = k < 1;
+      this.mergeBeam.scale.set(1 + k * 0.6, 0.5 + Math.min(1, k * 3) * 7, 1 + k * 0.6);
+      this.mergeBeam.position.y = this.mergeBeam.scale.y / 2;
+      this.mergeBeam.material.opacity = 0.75 * (1 - k);
+      if (this.mergeAnim.t > 0.9) this.mergeAnim = null;
+    }
+    const loss = run.lastLoss;
+    if (loss && loss.id !== this.lastLossId) {
+      if (this.lastLossId !== null || loss.id > 0) {
+        const at = this._teamSlot(Math.max(0, (run.team || []).length), false, distance, run);
+        this._burstAt(at.x, 0.8, at.z, [0x7b8193, 0xb9bfcc, 0xff5367], 14, 1.2);
+      }
+      this.lastLossId = loss.id;
+    }
+  }
+
+  _burstAt(x, y, z, palette, count, speed, size = 1) {
+    const group = new THREE.Group();
+    group.position.set(x, y, z);
+    for (let i = 0; i < count; i += 1) {
+      const mat = new THREE.MeshBasicMaterial({ color: palette[i % palette.length], transparent: true });
+      const particle = new THREE.Mesh(this.geometries.sphereLow, mat);
+      particle.scale.setScalar((0.07 + (i % 3) * 0.03) * size);
+      const angle = i * Math.PI * 2 / count;
+      particle.userData.velocity = new THREE.Vector3(Math.cos(angle) * speed, (1.4 + (i % 4) * 0.45) * Math.max(1, size * 0.9), Math.sin(angle) * speed);
+      group.add(particle);
+    }
+    this.effectRoot.add(group);
+    this.effects.push({ group, age: 0, life: 0.8 });
   }
 
   setSkin(skin) {
@@ -754,7 +854,7 @@ export class DinoRenderer {
         }
         if (child.userData.gatePanel) child.material = positive ? this.materials.gatePanelGreen : this.materials.gatePanelRed;
       });
-      group.userData.valueLabel = this._makeLabel(`${positive ? '+' : ''}${item.value ?? ''}%`, positive ? '#20a952' : '#db3950', 0.68);
+      group.userData.valueLabel = this._makeLabel(positive ? `+${item.value ?? ''}%` : `${item.value} dino`, positive ? '#20a952' : '#db3950', 0.68);
       group.userData.valueLabel.position.set(0, 3.85, 0);
       group.add(group.userData.valueLabel);
     } else if (item.type === 'rival') {
@@ -928,7 +1028,7 @@ export class DinoRenderer {
     }
   }
 
-  render(run, dt, { menu = false } = {}) {
+  render(run, dt, { menu = false, teamView = false } = {}) {
     if (this.disposed || !this.level || !run) return;
     const safeDt = Math.min(Math.max(Number(dt) || 0, 0), 0.05);
     this.clockTime += safeDt;
@@ -938,6 +1038,7 @@ export class DinoRenderer {
     this._updateTrack(run.distance || 0);
     this._updatePlayerLabel(teamPower(run));
     this._updateTeam(run, menu, run.distance || 0);
+    if (!menu) this._updateTeamEffects(run, safeDt);
 
     // Hits flash the dinosaur red and shake the camera briefly.
     const hits = run.hits || 0;
@@ -980,22 +1081,36 @@ export class DinoRenderer {
     // Bigger dinosaurs push the camera up and back so the track ahead stays readable.
     const grow = powerScale - 1 + Math.max(0, 0.75 - this.camera.aspect) * 1.2;
     const shake = this.hitFlash > 0 ? this.hitFlash * 0.35 : 0;
+    // Team view (team panel open, e.g. before the boss): look at the team from the side so the
+    // evolution animation is visible above the panel, with the boss in the background.
+    const teamX = this.player.root.position.x;
+    const portrait = this.camera.aspect < 0.86;
     const desiredCamera = menu
       ? narrowMenu
         ? new THREE.Vector3(3.25, 3.05, -distance + 7.25)
         : new THREE.Vector3(6.1, 3.45, -distance + 6.25)
-      : new THREE.Vector3(this.player.root.position.x * 0.3, 6.85 + grow * 2.15, -distance + 10.2 + grow * 2.6);
-    const follow = 1 - Math.pow(0.002, Math.max(safeDt, 1 / 120));
-    if (menu || this.lastMenu !== menu) this.camera.position.copy(desiredCamera);
-    else this.camera.position.lerp(desiredCamera, follow);
-    this.lastMenu = menu;
-    if (shake) this.camera.position.add(new THREE.Vector3(Math.sin(this.clockTime * 91) * shake, Math.cos(this.clockTime * 77) * shake * 0.6, 0));
+      : teamView
+        ? new THREE.Vector3(teamX + (portrait ? this.teamCam.portraitX : this.teamCam.x), portrait ? this.teamCam.portraitY : this.teamCam.y, -distance + (portrait ? this.teamCam.portraitZ : this.teamCam.z))
+        : new THREE.Vector3(this.player.root.position.x * 0.3, 6.85 + grow * 2.15, -distance + 10.2 + grow * 2.6);
     const look = menu
       ? narrowMenu
         ? new THREE.Vector3(0, 1.25, -distance)
         : new THREE.Vector3(-0.45, 1.35, -distance)
-      : new THREE.Vector3(this.player.root.position.x * 0.5, 0.8, -distance - 14.8);
-    this.camera.lookAt(look);
+      : teamView
+        ? new THREE.Vector3(teamX, portrait ? this.teamCam.portraitLookY : this.teamCam.lookY, -distance + (portrait ? this.teamCam.portraitLookZ : this.teamCam.lookZ))
+        : new THREE.Vector3(this.player.root.position.x * 0.5, 0.8, -distance - 14.8);
+    const follow = 1 - Math.pow(teamView || this.lastTeamView ? 0.02 : 0.002, Math.max(safeDt, 1 / 120));
+    if (menu || this.lastMenu !== menu) {
+      this.camera.position.copy(desiredCamera);
+      this.cameraLook.copy(look);
+    } else {
+      this.camera.position.lerp(desiredCamera, follow);
+      this.cameraLook.lerp(look, follow);
+    }
+    this.lastMenu = menu;
+    this.lastTeamView = teamView && this.camera.position.distanceTo(desiredCamera) > 0.05;
+    if (shake) this.camera.position.add(new THREE.Vector3(Math.sin(this.clockTime * 91) * shake, Math.cos(this.clockTime * 77) * shake * 0.6, 0));
+    this.camera.lookAt(this.cameraLook);
 
     this.sun.position.set(this.camera.position.x - 10, 18, this.camera.position.z + 2);
     this.sun.target.position.set(this.player.root.position.x, 0, -distance - 8);
@@ -1014,7 +1129,8 @@ export class DinoRenderer {
         this.boss.root.scale.setScalar(this.bossScale * (1 + Math.sin(Math.min(1, this.finaleTime / 0.5) * Math.PI) * 0.12));
       }
       if (this.bossLabel) this.bossLabel.visible = !(finished && run.status === 'won' && this.finaleTime > 0.5);
-      this.finishSet.visible = bossDistance < 175;
+      // The finish arch and cheering dinos would block the side view on the team panel.
+      this.finishSet.visible = bossDistance < 175 && !teamView;
       for (const child of this.finishSet.children) {
         if (child.userData.finishDino) this._animateDino(child.userData.finishDino, this.clockTime + child.position.x, 0.7);
       }

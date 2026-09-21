@@ -1,5 +1,5 @@
-// Dino Run v2.0.0 — touch, UI, local progress and runtime diagnostics.
-import { VERSION, WORLDS, createRun, steer, jump, tick, stars, teamPower, mergeTeam, resolveRecruit } from './engine.js';
+// Dino Run v2.1.0 — touch, UI, local progress and runtime diagnostics.
+import { VERSION, WORLDS, createRun, steer, jump, tick, stars, teamPower, mergeTeam, resolveRecruit, fightBoss, strongestLevel, reachableLevel } from './engine.js';
 import { DinoRenderer } from './renderer.js';
 import { readProgress, completeLevel, addCoins, buySkin, selectSkin, SKINS, skinById, discover } from './storage.js';
 
@@ -69,27 +69,27 @@ function updateHome() {
 function closeDialogs() { document.querySelectorAll('dialog[open]').forEach(d => d.close()); }
 const HINTS = [
   [0, 4, 'Veeg of tik ‹ › om van baan te wisselen'],
-  [4, 9, 'Groen Lv-getal? Versla die dino: hij komt in je team'],
-  [9, 14, 'Spring met ↑ (of veeg omhoog) over boomstammen'],
-  [14, 19, 'Twee dezelfde dino’s? Sleep ze op elkaar: 1 level hoger!']
+  [4, 9, 'Groen Lv? Versla die dino: hij komt in je team'],
+  [9, 14, 'Vallen kosten je kleinste dino. Rood Lv = wegwezen!'],
+  [14, 19, 'Bij de finish evolueer je tot je de eindbaas aankunt']
 ];
 function hintText() {
   const fork = run.level.forks?.find(f => run.distance >= f.start - 24 && run.distance < f.end);
   if (fork) return `← ${fork.leftLabel} · ${fork.rightLabel} →`;
   if (run.level.number <= 2 && run.time < 19) return HINTS.find(([from, to]) => run.time >= from && run.time < to)?.[2];
   if (run.distance < run.level.length * .8) return run.time < 5 ? `Groei van Lv 1 naar de eindbaas: Lv ${run.level.bossLevel}` : null;
-  const short = run.level.bossPower - teamPower(run);
-  return short > 0 ? `Nog ${short} kracht nodig voor de eindbaas!` : 'Je team is klaar voor de eindbaas!';
+  const reach = reachableLevel(run);
+  return reach >= run.level.bossLevel ? `Samengevoegd haal je Lv ${reach}: klaar voor de eindbaas!` : `Samengevoegd haal je Lv ${reach}; de eindbaas is Lv ${run.level.bossLevel}`;
 }
 function updateGameUI() {
   $('hud-level').textContent = `LEVEL ${run.level.number} · ${WORLDS[run.level.world].name.toUpperCase()}`;
   $('run-progress').style.width = `${Math.min(100, run.distance / run.level.length * 100)}%`;
   $('coins').textContent = run.coins;
-  $('power').textContent = powerText(teamPower(run));
-  $('boss').textContent = powerText(run.level.bossPower);
-  $('boss-label').textContent = `EINDBAAS · LV ${run.level.bossLevel}`;
-  $('power-card').classList.toggle('strong', teamPower(run) >= run.level.bossPower);
-  $('growth').textContent = `${run.team.length}/9 dino’s · hoogste Lv ${Math.max(...run.team) + 1}`;
+  $('power').textContent = `Lv ${reachableLevel(run)}`;
+  $('boss').textContent = `Lv ${run.level.bossLevel}`;
+  $('boss-label').textContent = 'EINDBAAS';
+  $('power-card').classList.toggle('strong', reachableLevel(run) >= run.level.bossLevel);
+  $('growth').textContent = `${run.team.length}/9 dino’s · kracht ${powerText(teamPower(run))}`;
   updateTeamStrip();
   $('shield-badge').hidden = !run.shield;
   const hint = mode === 'playing' ? hintText() : null;
@@ -123,21 +123,23 @@ function finish() {
   finaleUntil = performance.now() + FINALE_MS[won ? 'won' : 'lost'];
   $('toast').hidden = true; $('game-hint').hidden = true;
   tone(won ? 'win' : 'hit');
-  log(won ? 'level-won' : 'level-lost', { level: run.level.number, stars: lastRating, team: run.team, teamPower: teamPower(run), boss: run.level.bossPower, bossLevel: run.level.bossLevel, coins: run.coins, hits: run.hits, seconds: Math.round(run.time) }); flushLog();
+  log(won ? 'level-won' : 'level-lost', { level: run.level.number, stars: lastRating, cause: run.cause, team: run.team, strongest: strongestLevel(run), bossLevel: run.level.bossLevel, coins: run.coins, hits: run.hits, lost: run.lost, merges: run.merges, seconds: Math.round(run.time) }); flushLog();
 }
 function showResult() {
   mode = 'result'; const won = run.status === 'won', rating = lastRating, last = run.level.number === 100;
   $('result-symbol').textContent = won ? '✦' : '↻';
-  $('result-eyebrow').textContent = won ? `LEVEL ${run.level.number} VOLTOOID` : 'DE EINDBAAS WAS NOG TE STERK';
+  $('result-eyebrow').textContent = won ? `LEVEL ${run.level.number} VOLTOOID` : run.cause === 'boss' ? 'DE EINDBAAS WAS NOG TE STERK' : 'OEPS, JE BENT AF';
   $('result-title').textContent = won ? last ? 'Koning van de eilanden!' : rating === 3 ? 'Perfecte run!' : 'Eindbaas verslagen!' : 'Nog een avontuur?';
   $('result-stars').textContent = won ? '★'.repeat(rating) + '☆'.repeat(3 - rating) : '♡';
-  $('result-power').textContent = powerText(teamPower(run));
-  $('result-boss').textContent = powerText(run.level.bossPower);
+  $('result-power').textContent = `Lv ${strongestLevel(run)}`;
+  $('result-boss').textContent = `Lv ${run.level.bossLevel}`;
   $('result-coins').textContent = `+${run.coins} munten · pot ${progress.bank}`;
-  const short = run.level.bossPower - teamPower(run);
+  const lostWhy = run.cause === 'rival' ? 'Een te sterke dino ving je. Rood Lv betekent: uitwijken!'
+    : run.cause === 'trap' ? 'Je had geen dino’s meer om je te beschermen tegen de val.'
+    : `Je sterkste dino was Lv ${strongestLevel(run)}, de eindbaas Lv ${run.level.bossLevel}. Versla meer dino’s en voeg ze samen.`;
   $('result-detail').textContent = won
     ? last ? 'Alle 100 levels gehaald! Speel ze opnieuw voor drie sterren.' : rating === 3 ? 'Geen enkele botsing. Het volgende eiland ligt open.' : 'Drie sterren? Haal de finish zonder botsingen.'
-    : `Nog ${short} teamkracht nodig. Versla meer groene dino’s en ontwijk botsingen: die kosten teamkracht.`;
+    : lostWhy;
   $('next-level').hidden = !won || last;
   $('retry').className = won ? 'secondary' : 'primary';
   $('result-dialog').showModal();
@@ -304,13 +306,25 @@ function teamCard(tier, index, isAtlas = false) {
 function renderTeamMenu() {
   const incoming = run.pendingRecruit;
   const pending = incoming !== null && incoming !== undefined;
-  $('team-summary').textContent = `${run.team.length} / 9 teamleden · teamkracht ${powerText(teamPower(run))} · eindbaas Lv ${run.level.bossLevel} (${powerText(run.level.bossPower)})`;
+  const boss = run.status === 'boss';
+  const strongest = strongestLevel(run), reach = reachableLevel(run), bossLevel = run.level.bossLevel;
+  $('team-title').textContent = boss ? `Eindbaas Lv ${bossLevel}: evolueer je team!` : 'Samen worden ze groter.';
+  $('team-summary').textContent = boss
+    ? `Je sterkste dino: Lv ${strongest} · samengevoegd haalbaar: Lv ${reach} · eindbaas: Lv ${bossLevel}`
+    : `${run.team.length} / 9 teamleden · samengevoegd haalbaar: Lv ${reach} · eindbaas Lv ${bossLevel}`;
   $('recruit-offer').hidden = !pending;
-  $('team-close').hidden = pending;
+  $('team-close').hidden = pending || boss;
   $('team-done').hidden = pending;
+  $('team-done').textContent = boss ? (strongest >= bossLevel ? '⚔ Vecht tegen de eindbaas!' : `⚔ Toch vechten (Lv ${strongest} tegen Lv ${bossLevel})`) : 'Klaar · verder ➜';
+  $('team-done').className = boss && strongest >= bossLevel ? 'primary' : 'secondary';
+  $('team-dialog').classList.toggle('boss-prep', boss);
   $('team-merge').hidden = false;
   $('team-merge').disabled = !mergePair();
-  $('team-instruction').textContent = pending ? (mergePair() ? 'Je team is vol. Voeg twee gelijke dino’s samen (slepen of de knop): dan komt er plek en sluit de nieuwkomer aan. Je kunt de nieuwkomer ook op een gelijke dino slepen, of een teamlid aantikken om te vervangen.' : 'Je team is vol. Sleep de nieuwkomer op een dino van hetzelfde level, of tik op een teamlid om het te vervangen; vrijlaten kan ook.') : selectedSlot === null ? 'Sleep een dino op een dino van hetzelfde level: samen worden ze 1 level hoger en je houdt een plek vrij. Twee keer tikken werkt ook.' : run.team[selectedSlot] === 20 ? 'Deze dino is Lv 21: het hoogste level.' : `Sleep op nog een Lv ${run.team[selectedSlot] + 1}. Groen omlijnde dino’s passen bij elkaar.`;
+  $('team-instruction').textContent = boss
+    ? strongest >= bossLevel ? `Je Lv ${strongest}-dino kan de eindbaas aan. Vecht!`
+      : reach >= bossLevel ? `Sleep gelijke dino’s op elkaar (of gebruik de knop) tot je een Lv ${bossLevel} hebt. Kijk hoe ze evolueren!`
+      : `Samen kom je maar tot Lv ${reach}. Vecht toch, of probeer het level opnieuw en versla meer dino’s.`
+    : pending ? (mergePair() ? 'Je team is vol. Voeg twee gelijke dino’s samen (slepen of de knop): dan komt er plek en sluit de nieuwkomer aan. Je kunt de nieuwkomer ook op een gelijke dino slepen, of een teamlid aantikken om te vervangen.' : 'Je team is vol. Sleep de nieuwkomer op een dino van hetzelfde level, of tik op een teamlid om het te vervangen; vrijlaten kan ook.') : selectedSlot === null ? 'Sleep een dino op een dino van hetzelfde level: samen worden ze 1 level hoger en je houdt een plek vrij. Twee keer tikken werkt ook.' : run.team[selectedSlot] === 20 ? 'Deze dino is Lv 21: het hoogste level.' : `Sleep op nog een Lv ${run.team[selectedSlot] + 1}. Groen omlijnde dino’s passen bij elkaar.`;
   if (pending) $('incoming-dino').innerHTML = `${dinoPortrait(dinoByTier(incoming))}<div><small>WIL BIJ JOUW TEAM</small><strong>${dinoByTier(incoming).name}</strong><span>Lv ${incoming + 1} · ⚡ ${powerText(dinoByTier(incoming).power)}</span></div>`;
   if (pending) bindDinoDrag($('incoming-dino'),-1,incoming);
   const grid = $('team-grid'); grid.replaceChildren();
@@ -322,19 +336,29 @@ function renderTeamMenu() {
 function openTeam() {
   if (!run || mode === 'error' || mode === 'finale') return;
   if (mode !== 'team') teamReturnMode = mode;
-  mode = 'team'; selectedSlot = null; renderTeamMenu();
+  mode = 'team'; selectedSlot = null; renderTeamMenu(); document.body.classList.add('team-open');
   if (!$('team-dialog').open) $('team-dialog').showModal();
   log('team-open', { pending: run.pendingRecruit, team: run.team }); flushLog();
 }
 function closeTeam() {
   if (run.pendingRecruit !== null && run.pendingRecruit !== undefined) return;
-  $('team-dialog').close(); selectedSlot = null; syncTeam(); updateHome(); updateGameUI();
+  $('team-dialog').close(); document.body.classList.remove('team-open'); selectedSlot = null; syncTeam(); updateHome(); updateGameUI();
+  if (run.status === 'boss') {
+    mode = 'playing'; fightBoss(run);
+    log('boss-fight', { strongest: strongestLevel(run), bossLevel: run.level.bossLevel, result: run.status });
+    finish(); return;
+  }
   mode = teamReturnMode; lastTime = performance.now();
   if (mode === 'playing' && run.status !== 'running') finish();
 }
+function openBossPrep() {
+  if (mode === 'team') return;
+  tone('start'); openTeam();
+  log('boss-prep', { team: run.team, strongest: strongestLevel(run), reachable: reachableLevel(run), bossLevel: run.level.bossLevel });
+}
 $('team-toggle').onclick = openTeam;
 $('team-close').onclick = $('team-done').onclick = closeTeam;
-$('team-dialog').addEventListener('cancel', event => { event.preventDefault(); closeTeam(); });
+$('team-dialog').addEventListener('cancel', event => { event.preventDefault(); if (run.status !== 'boss') closeTeam(); });
 $('release-recruit').onclick = () => { const tier = run.pendingRecruit; resolveRecruit(run, null); log('recruit-released', {tier}); renderTeamMenu(); closeTeam(); };
 $('team-merge').onclick = () => { const pair = mergePair(); if (pair) evolvePair(...pair); };
 function openAtlas() {
@@ -407,23 +431,24 @@ function frame(time) {
   try {
     if (mode === 'playing' && !qaMode) advanceSimulation(dt);
     if (mode === 'finale' && time >= finaleUntil) showResult();
-    renderer.render(run, ['paused','result','team'].includes(mode) ? 0 : dt, {menu:mode === 'home' || (mode === 'team' && teamReturnMode === 'home')});
+    renderer.render(run, ['paused','result'].includes(mode) ? 0 : dt, {menu:mode === 'home', teamView:mode === 'team'});
     if (toastUntil && time > toastUntil) $('toast').hidden = true;
   } catch (error) { mode='error'; log('render-error',{message:error.message,stack:error.stack}); flushLog(); $('error-detail').textContent='De 3D-weergave is gestopt. Probeer de pagina opnieuw te openen.'; closeDialogs(); $('error-dialog').showModal(); return; }
   requestAnimationFrame(frame);
 }
-const HURT = { hit: 'Botsing!', burn: 'Au, lava!', 'rival-hit': 'Te sterke rivaal!', 'gate-loss': 'Rode poort!' };
+const HURT = { hit: 'Botsing!', burn: 'Au, lava!', 'gate-loss': 'Rode poort!', death: '' };
 function advanceSimulation(dt) {
   if (mode !== 'playing') return;
   tick(run, dt);
   for (const event of run.events || []) {
-    if (HURT[event.type]) { tone('hit'); flash(); toast(`${HURT[event.type]} ${event.message}`, 'bad'); }
+    if (event.type in HURT) { tone('hit'); flash(); toast(`${HURT[event.type]} ${event.message}`.trim(), 'bad'); }
     else if (['rival-win','recruit','merge'].includes(event.type)) { tone('eat'); toast(event.message, 'good'); }
     else if (event.type === 'coin') tone('coin');
     else if (['food','gate','shield','shield-used'].includes(event.type)) { tone('collect'); if (event.type !== 'food') toast(event.message, 'good'); }
   }
   syncTeam(); updateGameUI();
   if (run.pendingRecruit !== null && run.pendingRecruit !== undefined) { openTeam(); return; }
+  if (run.status === 'boss') { openBossPrep(); return; }
   if (run.status !== 'running') finish();
 }
 try {
@@ -433,7 +458,8 @@ try {
   if (qaMode) {
     window.dinoTest = {
       state:()=>({mode,run,progress}),
-      step:dt=>{advanceSimulation(dt);renderer.render(run,dt,{menu:mode==='home'});},
+      renderer,
+      step:dt=>{advanceSimulation(dt);renderer.render(run,dt,{menu:mode==='home',teamView:mode==='team'});},
       render:()=>renderer.render(run,0,{menu:mode==='home'}),
       fixture:(number,team)=>{progress={...progress,unlocked:100};save();startLevel(number);if(team)run.team=team.slice();updateGameUI();},
       offer:tier=>{run.level.objects=[{id:'qa-recruit-'+run.distance,type:'rival',tier,value:dinoByTier(tier).power,z:run.distance+0.2,lane:run.targetLane}];advanceSimulation(.05);},

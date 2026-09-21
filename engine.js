@@ -1,6 +1,6 @@
 import { DINOS, MAX_LEVEL, dinoByTier, levelPower } from './dinos.js';
 
-export const VERSION = '2.0.0';
+export const VERSION = '2.1.0';
 
 export const WORLDS = Object.freeze([
   { name: 'Palmenbaai', sky: '#65d8ff', water: '#169bd5', ground: '#f4cf67', accent: '#ff5f57' },
@@ -25,6 +25,7 @@ const GRAVITY = 20;
 const MAX_EVENTS = 8;
 const LANE_HIT_RADIUS = 0.45;
 const LAVA_FROM_LEVEL = 4;
+const RED_GATE_FROM_LEVEL = 11;
 // The leader is always a Lv 1 dino (power 1); every run starts with one Lv 1 companion.
 const LEADER_POWER = 1;
 const START_TEAM = Object.freeze([0]);
@@ -35,25 +36,15 @@ export function bossLevelFor(number) {
   return FIRST_BOSS_LEVEL + Math.round((MAX_LEVEL - FIRST_BOSS_LEVEL) * (number - 1) / 99);
 }
 
-// Rocks, logs, lava and red gates take a percentage of the current team power.
-// Damage is temporary for this run and never goes below the leader's own power.
-function hazardDamage(type, world) {
-  return type === 'lava' ? 24 + world : 14 + world;
-}
-
-export function hazardLoss(power, percent) {
-  return Math.max(1, Math.ceil(power * percent / 100));
+// Traps knock dinos out of the team, smallest first: rocks, logs and red gates one, lava two.
+export function trapLoss(type) {
+  return type === 'lava' ? 2 : 1;
 }
 
 // A rival can be beaten up to one level above the team: at most twice the team power.
-// Only the boss asks for the team's full strength.
+// Touching a stronger rival ends the run.
 export function canBeat(power, value) {
   return power * 2 >= value;
-}
-
-// A stronger rival knocks off half the difference, but never more than 40% of your power.
-export function rivalLoss(power, value) {
-  return Math.min(Math.max(1, Math.ceil((value - power) / 2)), Math.max(1, Math.ceil(power * 0.4)));
 }
 
 function sanitizeTeam(team) {
@@ -63,15 +54,27 @@ function sanitizeTeam(team) {
   return clean.length ? clean : [...START_TEAM];
 }
 
-function fullPower(run) {
-  return LEADER_POWER + sanitizeTeam(run.team).reduce((sum, tier) => sum + dinoByTier(tier).power, 0);
-}
-
 export function teamPower(run) {
   if (!run) return LEADER_POWER;
-  const full = fullPower(run);
-  const damage = Number.isFinite(run.teamDamage) ? clamp(run.teamDamage, 0, full - LEADER_POWER) : 0;
-  return full - damage;
+  return LEADER_POWER + (Array.isArray(run.team) ? run.team : []).reduce((sum, tier) => sum + (dinoByTier(tier)?.power || 0), 0);
+}
+
+// Level of the strongest team dino right now (the leader alone counts as Lv 1).
+export function strongestLevel(run) {
+  return run?.team?.length ? Math.max(...run.team) + 1 : 1;
+}
+
+// The highest level the team can reach by merging everything: power doubles per
+// level, so equal pairs always combine into the binary form of the team's total.
+export function reachableLevel(run) {
+  const total = (run?.team || []).reduce((sum, tier) => sum + (dinoByTier(tier)?.power || 0), 0);
+  return total > 0 ? Math.floor(Math.log2(total)) + 1 : 1;
+}
+
+function recordMerge(run, slot, removed, tier) {
+  run.merges = (run.merges || 0) + 1;
+  run.lastMerge = { id: run.merges, slot, removed, tier };
+  pushEvent(run, 'merge', `${dinoByTier(tier).name} · Lv ${tier + 1} ontstaan!`);
 }
 
 export function mergeTeam(run, indexA, indexB) {
@@ -83,8 +86,7 @@ export function mergeTeam(run, indexA, indexB) {
   const remove = Math.max(indexA, indexB);
   run.team[keep] = tier + 1;
   run.team.splice(remove, 1);
-  run.merges = (run.merges || 0) + 1;
-  pushEvent(run, 'merge', `${dinoByTier(tier + 1).name} · Lv ${tier + 2} ontstaan!`);
+  recordMerge(run, keep, remove, tier + 1);
   // Merging frees a slot: a dino that was waiting for room joins right away.
   if (dinoByTier(run.pendingRecruit) && run.team.length < MAX_TEAM) {
     const waiting = run.pendingRecruit;
@@ -121,8 +123,7 @@ export function resolveRecruit(run, replaceIndex = null) {
   const current = run.team[replaceIndex];
   if (current === incoming && incoming < DINOS.length - 1) {
     run.team[replaceIndex] = incoming + 1;
-    run.merges = (run.merges || 0) + 1;
-    pushEvent(run, 'merge', `${dinoByTier(incoming + 1).name} · Lv ${incoming + 2} ontstaan!`);
+    recordMerge(run, replaceIndex, -1, incoming + 1);
   } else {
     run.team[replaceIndex] = incoming;
     pushEvent(run, 'recruit-replace', `${dinoByTier(incoming).name} neemt een teamplek over.`);
@@ -164,21 +165,17 @@ function validateLevelNumber(number) {
 
 /**
  * The rival ladder: one rival of every dino level from Lv 1 up to one below the
- * boss, in rising order. Beating each one doubles the team roughly, so the next
- * is just within reach; the last step brings the team exactly to boss strength.
- * Some levels appear twice (spare rivals): in level 1 all of them, in level 100
- * about a third. Spares are what make up for a missed rival or a bump.
+ * boss, in rising order. Together with the starting Lv 1 they merge into exactly
+ * one dino of the boss level, so every ladder rival counts. A few spare rivals of
+ * the lowest levels (those are lost first to traps) give some room for mistakes:
+ * three in level 1, none from about level 70.
  */
 function rivalLadder(bossTier, number) {
-  const steps = bossTier;
-  const spareShare = 1 - 0.65 * (number - 1) / 99;
-  const spares = Math.round(steps * spareShare);
-  const spareTiers = new Set();
-  for (let index = 0; index < spares; index += 1) spareTiers.add(steps - 1 - Math.floor(index * steps / spares));
+  const spares = Math.max(0, Math.round(3 - 3.2 * (number - 1) / 70));
   const ladder = [];
-  for (let tier = 0; tier < steps; tier += 1) {
+  for (let tier = 0; tier < bossTier; tier += 1) {
     ladder.push(tier);
-    if (spareTiers.has(tier)) ladder.push(tier);
+    if (tier < spares) ladder.push(tier);
   }
   return ladder;
 }
@@ -198,17 +195,17 @@ export function generateLevel(number) {
   const world = Math.floor((number - 1) / 10);
   const random = mulberry32((number * 0x9E3779B1) >>> 0);
   const speed = Number((8.5 + (number - 1) * 0.035).toFixed(3));
-  const encounterCount = 12 + Math.floor((number - 1) / 4);
+  const encounterCount = 14 + Math.floor((number - 1) / 4);
   const bossLevel = bossLevelFor(number);
   const bossTier = bossLevel - 1;
   const bossPower = levelPower(bossLevel);
   const ladder = rivalLadder(bossTier, number);
-  const jumpEvery = 7 - Math.floor((number - 1) / 25);
+  const jumpEvery = 5 - Math.floor((number - 1) / 34);
   const isJump = index => index > 0 && (index + number) % jumpEvery === 0;
   const forkSet = total => new Set([Math.floor(total / 3), Math.floor(total * 2 / 3)]);
   const slotsFor = total => {
     const forkIndexes = forkSet(total);
-    return Array.from({ length: total }, (_, index) => index).filter(index => forkIndexes.has(index) || !isJump(index));
+    return Array.from({ length: total }, (_, index) => index).filter(index => index > 0 && (forkIndexes.has(index) || !isJump(index)));
   };
 
   // Every ladder rival needs its own encounter; long ladders stretch the level.
@@ -242,16 +239,18 @@ export function generateLevel(number) {
     objects.push(object);
   };
   const rivalValue = tier => dinoByTier(tier).power;
+  const trapFor = (index, lane) => {
+    const kinds = ['rock', 'log', 'lava', 'rock', 'log'];
+    let type = kinds[(index * 3 + lane + 1 + number) % kinds.length];
+    if (type === 'lava' && number < LAVA_FROM_LEVEL) type = 'log';
+    if (number >= RED_GATE_FROM_LEVEL && (index + lane + number) % 6 === 0) return ['gate', -1];
+    return [type, trapLoss(type)];
+  };
 
   for (let index = 0; index < totalEncounters; index += 1) {
     const encounterZ = startZ + spacing * index;
-    const rewardSelector = (index + number + world) % 4;
-    const rewardType = ['food', 'coin', 'gate', 'shield'][rewardSelector];
-    const rewardValue = rewardType === 'food'
-      ? 6 + ((index + number) % 3) * 2
-      : rewardType === 'gate'
-        ? 12 + Math.floor(world / 2)
-        : 1 + (rewardType === 'coin' && (index + number) % 5 === 0 ? 1 : 0);
+    const rewardType = (index + number) % 4 === 0 ? 'shield' : 'coin';
+    const rewardValue = 1 + ((index + number) % 5 === 0 ? 1 : 0);
 
     if (forks.has(index)) {
       const tier = rivalAt.get(index);
@@ -259,7 +258,7 @@ export function generateLevel(number) {
       const recruitLane = (number + index) % 2 === 0 ? -1 : 1;
       addObject(encounterZ, recruitLane, 'rival', rivalValue(tier), tier);
       addObject(encounterZ, -recruitLane, 'coin', 3);
-      addObject(encounterZ, 0, 'rock', hazardDamage('rock', world));
+      addObject(encounterZ, 0, 'rock', trapLoss('rock'));
       const dino = `${dinoByTier(tier).name} Lv ${tier + 1}`;
       forkList.push({
         start: Number((encounterZ - 4).toFixed(3)),
@@ -277,35 +276,28 @@ export function generateLevel(number) {
     const laneChoices = LANES.filter(lane => lane !== previousLane || random() > 0.35);
     const safeLane = laneChoices[Math.floor(random() * laneChoices.length)] ?? previousLane;
     if (isJump(index)) {
-      const jumpHazards = ['log', 'rock', 'lava'];
-      let hazardType = jumpHazards[(index + world) % jumpHazards.length];
-      if (hazardType === 'lava' && number < LAVA_FROM_LEVEL) hazardType = 'rock';
-      for (const lane of LANES) addObject(encounterZ, lane, hazardType, hazardDamage(hazardType, world));
-      addObject(encounterZ + 1.6, safeLane, rewardType, rewardValue);
+      const [type, value] = trapFor(index, 0);
+      for (const lane of LANES) addObject(encounterZ, lane, type === 'gate' ? 'log' : type, type === 'gate' ? 1 : value);
+      addObject(encounterZ + 1.6, safeLane, 'coin', rewardValue);
       route.push({ z: Number((encounterZ - 4).toFixed(3)), lane: safeLane, jump: true });
     } else {
       if (rivalAt.has(index)) {
         ladderTier = rivalAt.get(index);
         addObject(encounterZ, safeLane, 'rival', rivalValue(ladderTier), ladderTier);
         addObject(encounterZ + 2.2, safeLane, 'coin', 1); // a coin behind every ladder rival keeps the shop reachable
-      } else {
+      } else if (index > 0) {
         addObject(encounterZ, safeLane, rewardType, rewardValue);
       }
-      const blockedLanes = LANES.filter(lane => lane !== safeLane);
-      const blockerCount = number <= 20 ? 1 : 2;
-      if (random() > 0.5) blockedLanes.reverse();
-      for (let blocker = 0; blocker < blockerCount; blocker += 1) {
-        const lane = blockedLanes[blocker];
-        const redGate = number >= 21 && (index + blocker + number) % 5 === 0;
-        const hazardIndex = (index + blocker + world + number) % 4;
-        let type = redGate ? 'gate' : ['rock', 'log', 'lava', 'rival'][hazardIndex];
-        if (type === 'lava' && number < LAVA_FROM_LEVEL) type = 'rock';
-        // Blocking rivals are three levels above the ladder: red for a normal run, a prize when you are well ahead.
-        const eliteTier = Math.min(MAX_LEVEL - 1, ladderTier + 3);
-        const value = redGate
-          ? -(10 + world + ((index + number) % 3))
-          : type === 'rival' ? rivalValue(eliteTier) : hazardDamage(type, world);
-        addObject(encounterZ, lane, type, value, type === 'rival' ? eliteTier : null);
+      // Two of the three lanes are always blocked: traps, and now and then a deadly elite rival.
+      for (const lane of LANES.filter(item => item !== safeLane)) {
+        const elite = index > 1 && (index * 7 + lane + number) % 9 === 0;
+        if (elite) {
+          const eliteTier = Math.min(MAX_LEVEL - 1, ladderTier + 3);
+          addObject(encounterZ, lane, 'rival', rivalValue(eliteTier), eliteTier);
+        } else {
+          const [type, value] = trapFor(index, lane);
+          addObject(encounterZ, lane, type, value);
+        }
       }
       route.push({ z: Number((encounterZ - 9).toFixed(3)), lane: safeLane });
     }
@@ -342,10 +334,13 @@ export function createRun(number, team = START_TEAM) {
     vy: 0,
     power: LEADER_POWER,
     team: sanitizeTeam(team),
-    teamDamage: 0,
     pendingRecruit: null,
     recruited: 0,
     merges: 0,
+    lastMerge: null,
+    lost: 0,
+    lastLoss: null,
+    cause: null,
     branchChoices: [],
     coins: 0,
     hits: 0,
@@ -382,20 +377,31 @@ function useShield(run, source) {
   return true;
 }
 
-// Damage drains the team for this run only, never the leader's own power.
-function takeDamage(run, damage, event) {
-  const loss = Math.min(damage, Math.max(0, teamPower(run) - LEADER_POWER));
-  run.hits += 1;
-  run.teamDamage += loss;
-  pushEvent(run, event, `-${loss} teamkracht`);
-  return loss;
+function die(run, cause, message) {
+  run.status = 'lost';
+  run.cause = cause;
+  pushEvent(run, 'death', message);
 }
 
-// Food and green gates restore a percentage of the team's full strength.
-function heal(run, percent, event, label) {
-  const amount = Math.min(run.teamDamage, Math.ceil(fullPower(run) * percent / 100));
-  run.teamDamage -= amount;
-  pushEvent(run, event, amount > 0 ? `${label} +${amount} kracht` : `${label}: team is fit`);
+// Each point of trap damage costs the smallest team dino; with no dino left to lose, the run ends.
+function hitTrap(run, count, event, source) {
+  run.hits += 1;
+  if (useShield(run, source)) return;
+  const lostTiers = [];
+  for (let point = 0; point < count; point += 1) {
+    if (!run.team.length) {
+      die(run, 'trap', `Au, ${source}! Je hebt geen dino’s meer om je te beschermen.`);
+      break;
+    }
+    const smallest = run.team.indexOf(Math.min(...run.team));
+    lostTiers.push(run.team[smallest]);
+    run.team.splice(smallest, 1);
+  }
+  if (lostTiers.length) {
+    run.lost += lostTiers.length;
+    run.lastLoss = { id: run.lost, tiers: lostTiers };
+    pushEvent(run, event, `${lostTiers.map(tier => `Lv ${tier + 1}`).join(' en ')} kwijt`);
+  }
 }
 
 /**
@@ -409,7 +415,7 @@ function applyObject(run, object, collisionY) {
   switch (object.type) {
     case 'food':
       collect();
-      heal(run, object.value, 'food', 'Smikkel');
+      pushEvent(run, 'food', 'Smikkel!');
       break;
     case 'coin':
       collect();
@@ -418,8 +424,7 @@ function applyObject(run, object, collisionY) {
       break;
     case 'gate':
       collect();
-      if (object.value >= 0) heal(run, object.value, 'gate', 'Herstelpoort');
-      else takeDamage(run, hazardLoss(teamPower(run), Math.abs(object.value)), 'gate-loss');
+      if (object.value < 0) hitTrap(run, Math.abs(object.value), 'gate-loss', 'de rode poort');
       break;
     case 'shield':
       collect();
@@ -431,14 +436,12 @@ function applyObject(run, object, collisionY) {
       const clearance = object.type === 'rock' ? 0.78 : 1;
       if (collisionY >= clearance) break;
       collect();
-      if (!useShield(run, object.type === 'rock' ? 'de rots' : 'de boomstam')) {
-        takeDamage(run, hazardLoss(teamPower(run), object.value), 'hit');
-      }
+      hitTrap(run, object.value, 'hit', object.type === 'rock' ? 'de rots' : 'de boomstam');
       break;
     }
     case 'lava':
       if (collisionY >= 0.58) break;
-      if (!useShield(run, 'de lava')) takeDamage(run, hazardLoss(teamPower(run), object.value), 'burn');
+      hitTrap(run, object.value, 'burn', 'de lava');
       break;
     case 'rival':
       if (collisionY >= 1.05) break;
@@ -446,8 +449,9 @@ function applyObject(run, object, collisionY) {
       if (canBeat(teamPower(run), object.value)) {
         pushEvent(run, 'rival-win', `${dinoByTier(object.tier).name} verslagen!`);
         recruitDino(run, object.tier);
-      } else if (!useShield(run, 'de rivaal')) {
-        takeDamage(run, rivalLoss(teamPower(run), object.value), 'rival-hit');
+      } else if (!useShield(run, 'de sterke dino')) {
+        run.hits += 1;
+        die(run, 'rival', `${dinoByTier(object.tier).name} (Lv ${object.tier + 1}) was te sterk!`);
       }
       break;
     default:
@@ -489,16 +493,27 @@ function resolveForkChoices(run, fromDistance, toDistance) {
   });
 }
 
-function finish(run) {
+// At the finish the run waits in 'boss' status: the player evolves the team first, then calls fightBoss.
+function reachBoss(run) {
   if (run.status !== 'running') return;
   run.distance = run.level.length;
-  if (teamPower(run) >= run.level.bossPower) {
+  run.status = 'boss';
+  pushEvent(run, 'boss-ready', `Eindbaas Lv ${run.level.bossLevel}! Evolueer je team.`);
+}
+
+// The strongest single dino has to be at least as high as the boss.
+export function fightBoss(run) {
+  if (!run || run.status !== 'boss') return false;
+  run.events = [];
+  if (strongestLevel(run) >= run.level.bossLevel) {
     run.status = 'won';
     pushEvent(run, 'boss-win', 'Eindbaas verslagen!');
   } else {
     run.status = 'lost';
-    pushEvent(run, 'boss-loss', `Nog ${run.level.bossPower - teamPower(run)} teamkracht nodig.`);
+    run.cause = 'boss';
+    pushEvent(run, 'boss-loss', `Je sterkste dino is Lv ${strongestLevel(run)}; de eindbaas is Lv ${run.level.bossLevel}.`);
   }
+  return true;
 }
 
 export function tick(run, dt) {
@@ -533,7 +548,7 @@ export function tick(run, dt) {
     resolveObjects(run, previousDistance, run.distance, previousX, run.x, previousY, run.y);
     resolveForkChoices(run, previousDistance, run.distance);
     if (run.pendingRecruit !== null) break;
-    if (run.status === 'running' && run.distance >= run.level.length) finish(run);
+    if (run.status === 'running' && run.distance >= run.level.length) reachBoss(run);
   }
 
   return run;
