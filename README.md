@@ -1,6 +1,6 @@
 # Dino Run · Eilandenexpeditie
 
-Een kleurrijke 3D-dinosaurusrunner voor iPad, iPhone en computer: ren, eet, groei en versla de eindbaas. 100 levels op tien eilanden, zonder reclame, account of aankopen.
+Een kleurrijke 3D-dinosaurusrunner voor iPad, iPhone en computer: rekruteer en evolueer een team van maximaal negen dinos. Twintig evoluties, splitsingen en bruggen. 100 levels op tien eilanden, zonder reclame, account of aankopen.
 
 **Spelen:** https://lpompen.github.io/dino-run/
 
@@ -8,4 +8,4 @@ Een kleurrijke 3D-dinosaurusrunner voor iPad, iPhone en computer: ren, eet, groe
 2. Kies Delen → Zet op beginscherm.
 3. Open de game vanaf het beginscherm; daarna werkt hij ook offline.
 
-Deze repository bevat alleen de gepubliceerde gamebestanden (v1.0.0). Three.js r160 staat onder de MIT-licentie (`vendor/LICENSE.txt`).
+Deze repository bevat alleen de gepubliceerde gamebestanden (v2.0.0). Three.js r160 staat onder de MIT-licentie (`vendor/LICENSE.txt`).

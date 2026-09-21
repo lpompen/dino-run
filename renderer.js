@@ -1,4 +1,6 @@
 import * as THREE from './vendor/three.module.js';
+import { dinoByTier } from './dinos.js';
+import { teamPower, canBeat } from './engine.js';
 
 const LANE_WIDTH = 2.4;
 const TRACK_WIDTH = 8.35;
@@ -8,6 +10,7 @@ const CHUNK_COUNT = 18;
 const NEAR_BEHIND = 18;
 const FAR_AHEAD = 145;
 const BOSS_GAP = 4.5;
+const LEADER_VISUAL_POWER = 10;
 
 const PALETTES = [
   { name: 'Palmenbaai', sky: 0x65d8ff, water: 0x169bd5, ground: 0xf4cf67, accent: 0xff5f57, foliage: 0x54be52 },
@@ -116,6 +119,12 @@ export class DinoRenderer {
     this.player = this._createDino({ body: 0x71dc52, belly: 0xd5f59c, spikes: 0xffd744, size: 1 });
     this.world.add(this.player.root);
     this.player.root.rotation.y = 0;
+    this.teamRoot = new THREE.Group();
+    this.teamDinos = new Map();
+    this.teamPools = new Map();
+    this.world.add(this.teamRoot);
+    this.forkRoot = new THREE.Group();
+    this.world.add(this.forkRoot);
 
     this.boss = null;
     this.bossLabel = null;
@@ -374,8 +383,72 @@ export class DinoRenderer {
     }
 
     root.scale.setScalar(colors.size || 1);
+    const dino = { root, rig, body, headPivot, tail, legs, arms, wings: [], materials: [bodyMat, bellyMat, spikeMat, eyeMat] };
+    if (colors.spec) this._addDinoFeatures(dino, colors.spec);
     markShadows(root);
-    return { root, rig, body, headPivot, tail, legs, arms, materials: [bodyMat, bellyMat, spikeMat, eyeMat] };
+    return dino;
+  }
+
+  // Tier models keep the original hero skin intact, while giving each recruit a
+  // readable silhouette. The added parts only use the shared low-poly geometry.
+  _addDinoFeatures(dino, spec) {
+    const { rig, body, headPivot, tail, materials } = dino;
+    const [bodyMat, bellyMat, spikeMat] = materials;
+    const tier = THREE.MathUtils.clamp(Number(spec.tier) || 0, 0, 20);
+    const add = (geometry, material, scale, position, parent = rig) => {
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.scale.set(...scale); mesh.position.set(...position); parent.add(mesh); return mesh;
+    };
+    const hornCount = 1 + Math.floor(tier / 6);
+    if (spec.shape === 'frill') {
+      const frill = add(this.geometries.sphereLow, spikeMat, [0.9 + tier * .025, .72, .18], [0, .08, .48], headPivot);
+      frill.rotation.x = .18;
+      for (let i = 0; i < hornCount; i += 1) {
+        const x = hornCount === 1 ? 0 : (i / (hornCount - 1) - .5) * .9;
+        const horn = add(this.geometries.cone, spikeMat, [.13, .42 + tier * .018, .13], [x, .48, -.42], headPivot);
+        horn.rotation.x = -.7;
+      }
+    }
+    if (spec.shape === 'armored') {
+      body.scale.set(.98, .7, 1.25);
+      for (const z of [-.62, .72]) for (const x of [-.62, .62]) {
+        const leg = add(this.geometries.sphereLow, bodyMat, [.24, .52, .27], [x, .58, z]);
+        leg.rotation.z = x * .08;
+      }
+      for (let i = 0; i < 4 + Math.floor(tier / 4); i += 1) add(this.geometries.sphereLow, spikeMat, [.36, .17, .28], [0, 2.0 - i * .15, -.22 + i * .34]);
+      const club = add(this.geometries.sphereLow, spikeMat, [.38 + tier * .015, .3, .38], [0, -.28, 1.85], tail);
+      club.rotation.y = .2;
+    }
+    if (spec.shape === 'plates' || spec.shape === 'sail') {
+      const count = 4 + Math.floor(tier / 4);
+      for (let i = 0; i < count; i += 1) {
+        const plate = add(this.geometries.cone, spikeMat, [.24, spec.shape === 'sail' ? .8 + tier * .03 : .42 + tier * .02, .11], [0, 2.0 - i * .1, -.35 + i * .38]);
+        plate.rotation.x = spec.shape === 'sail' ? 0 : Math.PI / 2;
+      }
+    }
+    if (spec.shape === 'longneck') {
+      body.scale.set(1.02, .72, 1.25);
+      for (const z of [-.58, .76]) for (const x of [-.62, .62]) add(this.geometries.sphereLow, bodyMat, [.22, .55, .25], [x, .58, z]);
+      for (let i = 0; i < 3 + Math.floor(tier / 5); i += 1) add(this.geometries.sphereLow, bodyMat, [.36, .48, .36], [0, 2.0 + i * .34, -.5 - i * .12]);
+      headPivot.position.set(0, 3.05 + tier * .04, -1.08);
+      dino.root.userData.tall = true;
+    }
+    if (spec.shape === 'raptor') {
+      const beak = add(this.geometries.cone, bellyMat, [.3, .72 + tier * .015, .26], [0, -.04, -.93], headPivot);
+      beak.rotation.x = -Math.PI / 2;
+      for (const x of [-1, 1]) {
+        const claw = add(this.geometries.cone, spikeMat, [.11, .33, .11], [x * .28, -.63, -.36], dino.legs[x < 0 ? 0 : 1]);
+        claw.rotation.x = -Math.PI / 2;
+      }
+    }
+    if (spec.flying || spec.shape === 'wing') {
+      for (const x of [-1, 1]) {
+        const wing = new THREE.Group(); wing.position.set(x * .57, 1.5, .05);
+        const membrane = add(this.geometries.sphereLow, bodyMat, [.92 + tier * .02, .08, .64], [x * .48, 0, .12], wing);
+        membrane.rotation.z = x * .18; rig.add(wing); dino.wings.push(wing);
+      }
+      dino.root.userData.flying = true;
+    }
   }
 
   loadLevel(level) {
@@ -388,6 +461,8 @@ export class DinoRenderer {
     this.finaleBurst = false;
     this._clearActiveObjects();
     this._clearEffects();
+    this._clearForks();
+    this._buildForks(level.forks || []);
 
     const p = PALETTES[Math.abs(level.world || 0) % PALETTES.length];
     this.currentPalette = p;
@@ -413,13 +488,92 @@ export class DinoRenderer {
     }
     this.finishSet = this._createFinishSet(level);
     this.world.add(this.finishSet);
-    this.boss = this._createDino({ body: 0xe95750, belly: 0xffb064, spikes: 0x67234b, size: 1 });
-    this.bossScale = Math.max(1.3, dinoScale(level.bossPower) * 1.2);
+    const bossSpec = dinoByTier(level.bossTier ?? 0) || dinoByTier(0);
+    this.boss = this._createDino({ body: bossSpec.body || 0xe95750, belly: bossSpec.belly || 0xffb064, spikes: bossSpec.spikes || 0x67234b, size: 1, spec: bossSpec });
+    this.bossScale = Math.max(1.12, 0.94 + (Number(bossSpec.size) || 1) * .56);
     this.boss.root.scale.setScalar(this.bossScale);
     this.boss.root.position.set(0, 0, -Math.max(24, level.length || 100) - BOSS_GAP);
     this.boss.root.rotation.y = Math.PI;
     this.world.add(this.boss.root);
-    this._setBossLabel(Math.max(1, Math.round(level.bossPower || 100)));
+    this._setBossLabel(`Lv ${level.bossLevel ?? (level.bossTier ?? 0) + 1}`);
+  }
+
+  _clearForks() {
+    this.forkRoot.traverse((node) => { if (node.userData.labelTexture) this._disposeLabel(node); });
+    this.forkRoot.clear();
+  }
+
+  _buildForks(forks) {
+    forks.forEach((fork, index) => {
+      const root = new THREE.Group();
+      const length = Math.max(10, fork.end - fork.start);
+      const midZ = -(fork.start + fork.end) / 2;
+      const makeBridge = (side, label, kind) => {
+        const bridge = new THREE.Group();
+        const offset = side * 2.25;
+        const deck = new THREE.Mesh(this.geometries.box, this.materials.brown);
+        deck.scale.set(3.25, .16, length); deck.position.set(offset, .12, midZ); bridge.add(deck);
+        for (const x of [-.9, .9]) {
+          const rail = new THREE.Mesh(this.geometries.cylinder, this.materials.white);
+          rail.scale.set(.06, length / 2, .06); rail.position.set(offset + x * 1.45, .57, midZ); rail.rotation.x = Math.PI / 2; bridge.add(rail);
+        }
+        const sign = this._makeLabel(label || (side < 0 ? 'LINKS' : 'RECHTS'), kind === 'risk' ? '#db3950' : '#20a952', .55);
+        sign.position.set(offset, 2.05, -(fork.start + 2)); bridge.add(sign);
+        root.add(bridge);
+      };
+      // Water masks the normal deck through this zone; two elevated wooden bridges
+      // clearly diverge even though game physics still uses the familiar 3 lanes.
+      const water = new THREE.Mesh(this.geometries.box, this.materials.water);
+      water.scale.set(TRACK_WIDTH + .3, .16, length + .08); water.position.set(0, .08, midZ); root.add(water);
+      makeBridge(-1, fork.leftLabel, fork.leftKind);
+      makeBridge(1, fork.rightLabel, fork.rightKind);
+      root.userData.fork = fork; root.userData.index = index;
+      this.forkRoot.add(root);
+    });
+  }
+
+  _forkX(distance, lane) {
+    const fork = (this.level?.forks || []).find((item) => distance >= item.start && distance <= item.end);
+    if (!fork) return lane * LANE_WIDTH;
+    const progress = THREE.MathUtils.smoothstep((distance - fork.start) / Math.max(1, fork.end - fork.start), 0, 1);
+    const side = lane < 0 ? -1 : 1;
+    // Engine selects left for a negative lane and right for center/right. Both
+    // bridge centre lines stay inside the physical 3.25-wide wooden decks.
+    return lane * (2.4 - .15 * Math.sin(progress * Math.PI));
+  }
+
+  _updateTeam(run, menu, distance) {
+    const tiers = Array.isArray(run.team) ? run.team.slice(0, 9) : [];
+    const wanted = new Set(tiers.map((tier, index) => `${tier}:${index}`));
+    for (const [key, dino] of this.teamDinos) {
+      if (wanted.has(key)) continue;
+      this.teamRoot.remove(dino.root); this.teamDinos.delete(key);
+      const pool = this.teamPools.get(dino.tier) || []; pool.push(dino); this.teamPools.set(dino.tier, pool);
+    }
+    tiers.forEach((rawTier, index) => {
+      const tier = THREE.MathUtils.clamp(Number(rawTier) || 0, 0, 20);
+      const key = `${tier}:${index}`;
+      let dino = this.teamDinos.get(key);
+      if (!dino) {
+        dino = this.teamPools.get(tier)?.pop();
+        if (!dino) {
+          const spec = dinoByTier(tier) || dinoByTier(0);
+          dino = this._createDino({ body: spec.body, belly: spec.belly, spikes: spec.spikes, spec });
+          dino.tier = tier;
+        }
+        this.teamDinos.set(key, dino); this.teamRoot.add(dino.root);
+      }
+      const inFork = (this.level?.forks || []).some((fork) => distance >= fork.start && distance <= fork.end);
+      const col = inFork ? 0 : index % 3; const row = inFork ? index : Math.floor(index / 3);
+      const baseX = menu ? -1.8 + col * 1.75 : this._forkX(distance, run.x || 0) + (col - 1) * (inFork ? 0 : 1.14);
+      const baseZ = -distance + (menu ? -1.6 - row * 1.55 : 2.0 + row * 1.42);
+      const flying = Boolean(dino.root.userData.flying);
+      dino.root.position.set(baseX, flying ? 1.65 + Math.sin(this.clockTime * 7 + index) * .18 : 0, baseZ);
+      dino.root.rotation.y = menu ? Math.PI : 0;
+      const size = Number((dinoByTier(tier) || {}).size) || 1;
+      dino.root.scale.setScalar((menu ? .5 : .52) * size);
+      this._animateDino(dino, this.clockTime + index * .33, run.status === 'running' ? .78 : .2);
+    });
   }
 
   setSkin(skin) {
@@ -464,12 +618,12 @@ export class DinoRenderer {
     return markShadows(root);
   }
 
-  _setBossLabel(power) {
+  _setBossLabel(text) {
     if (this.bossLabel) {
       this.boss.root.remove(this.bossLabel);
       this._disposeLabel(this.bossLabel);
     }
-    this.bossLabel = this._makeLabel(String(power), '#ff4d62', 1.45);
+    this.bossLabel = this._makeLabel(text, '#ff4d62', 1.45);
     this.bossLabel.position.set(0, 3.65, 0);
     this.boss.root.add(this.bossLabel);
   }
@@ -503,7 +657,7 @@ export class DinoRenderer {
     ctx.font = '900 56px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, 128, 59);
+    ctx.fillText(text, 128, 59, 190);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
@@ -518,6 +672,7 @@ export class DinoRenderer {
     label.material?.dispose();
   }
 
+  // The number above the leader is the whole team's strength (leader + team).
   _updatePlayerLabel(power) {
     const rounded = Math.max(0, Math.round(power || 0));
     if (rounded === this.lastPower) return;
@@ -526,12 +681,13 @@ export class DinoRenderer {
       this.player.root.remove(this.player.label);
       this._disposeLabel(this.player.label);
     }
-    this.player.label = this._makeLabel(String(rounded), '#20a952', 0.72);
+    const text = new Intl.NumberFormat('nl-NL', { notation: rounded >= 100000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(rounded);
+    this.player.label = this._makeLabel(text, '#20a952', 0.72);
     this.player.label.position.set(0, 2.78, 0);
     this.player.root.add(this.player.label);
   }
 
-  _createObject(type) {
+  _createObject(type, item = {}) {
     const group = new THREE.Group();
     const addMesh = (geometry, material, scale, position = [0, 0, 0]) => {
       const mesh = new THREE.Mesh(geometry, material);
@@ -561,8 +717,9 @@ export class DinoRenderer {
       lava.rotation.y = 0.04;
       for (let i = 0; i < 3; i += 1) addMesh(this.geometries.sphereLow, this.materials.gold, [0.14, 0.035, 0.14], [(i - 1) * 0.6, 0.14, (i % 2) * 0.55]);
     } else if (type === 'rival') {
-      const hue = new THREE.Color().setHSL(0.68, 0.72, 0.56);
-      const dino = this._createDino({ body: hue, belly: 0xffd7b5, spikes: 0xff6f72, size: 1 });
+      const spec = dinoByTier(item.tier ?? 0) || dinoByTier(0);
+      const hue = spec.body || new THREE.Color().setHSL(0.68, 0.72, 0.56);
+      const dino = this._createDino({ body: hue, belly: spec.belly || 0xffd7b5, spikes: spec.spikes || 0xff6f72, size: 1, spec });
       dino.root.rotation.y = Math.PI;
       group.add(dino.root);
       group.userData.dino = dino;
@@ -582,11 +739,13 @@ export class DinoRenderer {
   }
 
   _acquireObject(item) {
-    const pool = this.objectPools.get(item.type);
-    const group = pool?.pop() || this._createObject(item.type);
+    const poolKey = item.type === 'rival' ? `rival:${item.tier ?? 0}` : item.type;
+    const pool = this.objectPools.get(poolKey);
+    const group = pool?.pop() || this._createObject(item.type, item);
     group.visible = true;
-    group.position.set(item.lane * LANE_WIDTH, 0, -item.z);
+    group.position.set(this._forkX(item.z, item.lane), 0, -item.z);
     group.userData.item = item;
+    group.userData.poolKey = poolKey;
     if (item.type === 'gate') {
       const positive = (item.value ?? 1) >= 1;
       group.traverse((child) => {
@@ -595,15 +754,11 @@ export class DinoRenderer {
         }
         if (child.userData.gatePanel) child.material = positive ? this.materials.gatePanelGreen : this.materials.gatePanelRed;
       });
-      group.userData.valueLabel = this._makeLabel(`${positive ? '+' : ''}${item.value ?? '+'}`, positive ? '#20a952' : '#db3950', 0.68);
+      group.userData.valueLabel = this._makeLabel(`${positive ? '+' : ''}${item.value ?? ''}%`, positive ? '#20a952' : '#db3950', 0.68);
       group.userData.valueLabel.position.set(0, 3.85, 0);
       group.add(group.userData.valueLabel);
     } else if (item.type === 'rival') {
-      const idText = String(item.id);
-      let colorSeed = 0;
-      for (let i = 0; i < idText.length; i += 1) colorSeed = (colorSeed * 31 + idText.charCodeAt(i)) | 0;
-      group.userData.dino.materials[0].color.setHSL(0.52 + (Math.abs(colorSeed) % 30) / 100, 0.72, 0.56);
-      group.userData.dino.root.scale.setScalar(dinoScale(item.value));
+      group.userData.dino.root.scale.setScalar(0.72 + (Number((dinoByTier(item.tier ?? 0) || {}).size) || 1) * .42);
       group.userData.edible = null;
     }
     this.objectRoot.add(group);
@@ -618,9 +773,9 @@ export class DinoRenderer {
       group.userData.valueLabel = null;
     }
     group.userData.item = null;
-    const type = group.userData.type;
-    if (!this.objectPools.has(type)) this.objectPools.set(type, []);
-    this.objectPools.get(type).push(group);
+    const poolKey = group.userData.poolKey || group.userData.type;
+    if (!this.objectPools.has(poolKey)) this.objectPools.set(poolKey, []);
+    this.objectPools.get(poolKey).push(group);
     this.activeObjects.delete(id);
   }
 
@@ -648,25 +803,26 @@ export class DinoRenderer {
         group.position.y = bob * 0.07;
       } else if (type === 'rival') {
         this._animateDino(group.userData.dino, this.clockTime * 1.15 + group.position.z, 0.75);
-        this._updateRivalLabel(group, run.power || 0);
+        this._updateRivalLabel(group, teamPower(run));
       }
       if (collected.has(id)) this._releaseObject(id, group);
     }
   }
 
-  // Green number: you are strong enough to eat this rival. Red: dodge it.
+  // Green means the team can beat and recruit this rival; red means it is still too strong.
   _updateRivalLabel(group, power) {
     const item = group.userData.item;
     if (!item) return;
-    const edible = power >= item.value;
+    const edible = canBeat(power, item.value);
     if (edible === group.userData.edible) return;
     group.userData.edible = edible;
     if (group.userData.valueLabel) {
       group.remove(group.userData.valueLabel);
       this._disposeLabel(group.userData.valueLabel);
     }
-    group.userData.valueLabel = this._makeLabel(String(Math.max(1, Math.round(item.value))), edible ? '#20a952' : '#e64c65', 0.62);
-    group.userData.valueLabel.position.set(0, 2.55 * dinoScale(item.value) + 0.35, 0);
+    group.userData.valueLabel = this._makeLabel(`Lv ${(item.tier ?? 0) + 1}`, edible ? '#20a952' : '#e64c65', 0.62);
+    const scale = group.userData.dino.root.scale.x || 1;
+    group.userData.valueLabel.position.set(0, 2.55 * scale + 0.35, 0);
     group.add(group.userData.valueLabel);
   }
 
@@ -681,7 +837,7 @@ export class DinoRenderer {
     };
     const palette = palettes[item.type] || [0x5bec73, 0xff7daf, 0xffffff];
     const group = new THREE.Group();
-    group.position.set(item.lane * LANE_WIDTH, item.type === 'finale' ? 2.4 : 0.8, -item.z);
+    group.position.set(this._forkX(item.z, item.lane), item.type === 'finale' ? 2.4 : 0.8, -item.z);
     for (let i = 0; i < count; i += 1) {
       const mat = new THREE.MeshBasicMaterial({ color: palette[i % palette.length], transparent: true });
       const particle = new THREE.Mesh(this.geometries.sphereLow, mat);
@@ -740,6 +896,7 @@ export class DinoRenderer {
     dino.arms[1].rotation.x = stride * 0.55;
     dino.tail.rotation.y = Math.sin(phase * 4.5) * 0.17;
     dino.headPivot.rotation.z = Math.sin(phase * 3) * 0.025;
+    for (const [index, wing] of (dino.wings || []).entries()) wing.rotation.z = (index ? -1 : 1) * (0.34 + Math.sin(phase * 13) * 0.42 * intensity);
     dino.rig.position.y = Math.abs(Math.sin(phase * 9)) * 0.075 * intensity;
     dino.rig.rotation.z = Math.sin(phase * 9) * 0.025 * intensity;
   }
@@ -779,7 +936,8 @@ export class DinoRenderer {
     this._updateVisibleObjects(run);
     this._updateEffects(safeDt);
     this._updateTrack(run.distance || 0);
-    this._updatePlayerLabel(run.power);
+    this._updatePlayerLabel(teamPower(run));
+    this._updateTeam(run, menu, run.distance || 0);
 
     // Hits flash the dinosaur red and shake the camera briefly.
     const hits = run.hits || 0;
@@ -800,10 +958,10 @@ export class DinoRenderer {
       this._createPickupEffect({ type: 'finale', lane: 0, z: (this.level.length || 0) + BOSS_GAP }, 24);
     }
 
-    const powerScale = dinoScale(run.power);
+    const powerScale = dinoScale(LEADER_VISUAL_POWER);
     const narrowMenu = menu && this.camera.aspect < 0.86;
     const menuScale = menu ? (narrowMenu ? 0.9 : 1.16) / powerScale : 1;
-    const menuHeroX = menu ? (narrowMenu ? 0 : 2.45) : (run.x || 0) * LANE_WIDTH;
+    const menuHeroX = menu ? (narrowMenu ? 0 : 2.45) : this._forkX(run.distance || 0, run.x || 0);
     const distance = run.distance || 0;
     let playerZ = -distance;
     let playerY = Math.max(0, run.y || 0);
@@ -826,7 +984,7 @@ export class DinoRenderer {
       ? narrowMenu
         ? new THREE.Vector3(3.25, 3.05, -distance + 7.25)
         : new THREE.Vector3(6.1, 3.45, -distance + 6.25)
-      : new THREE.Vector3(this.player.root.position.x * 0.3, 7.4 + grow * 2.4, -distance + 11.4 + grow * 3);
+      : new THREE.Vector3(this.player.root.position.x * 0.3, 6.85 + grow * 2.15, -distance + 10.2 + grow * 2.6);
     const follow = 1 - Math.pow(0.002, Math.max(safeDt, 1 / 120));
     if (menu || this.lastMenu !== menu) this.camera.position.copy(desiredCamera);
     else this.camera.position.lerp(desiredCamera, follow);
@@ -836,7 +994,7 @@ export class DinoRenderer {
       ? narrowMenu
         ? new THREE.Vector3(0, 1.25, -distance)
         : new THREE.Vector3(-0.45, 1.35, -distance)
-      : new THREE.Vector3(this.player.root.position.x * 0.5, 0.8, -distance - 13.5);
+      : new THREE.Vector3(this.player.root.position.x * 0.5, 0.8, -distance - 14.8);
     this.camera.lookAt(look);
 
     this.sun.position.set(this.camera.position.x - 10, 18, this.camera.position.z + 2);
@@ -897,6 +1055,11 @@ export class DinoRenderer {
     if (this.bossLabel) this._disposeLabel(this.bossLabel);
     this._disposeDino(this.player);
     this._disposeDino(this.boss);
+    for (const dino of this.teamDinos.values()) this._disposeDino(dino);
+    for (const pool of this.teamPools.values()) for (const dino of pool) this._disposeDino(dino);
+    this.teamDinos.clear();
+    this.teamPools.clear();
+    this._clearForks();
     if (this.finishSet) {
       this.finishSet.traverse((node) => {
         if (node.userData.labelTexture) this._disposeLabel(node);

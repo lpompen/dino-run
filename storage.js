@@ -1,3 +1,5 @@
+import { dinoByTier } from './dinos.js';
+
 // Stable key schema; do not change across application updates. New fields are optional.
 export const SKINS = Object.freeze([
   { id: 'groen', name: 'Palmgroen', price: 0, body: 0x71dc52, belly: 0xd5f59c, spikes: 0xffd744 },
@@ -10,13 +12,19 @@ export const SKINS = Object.freeze([
 const SKIN_IDS = new Set(SKINS.map(skin => skin.id));
 const MAX_BANK = 1_000_000;
 
+// The collection book: every dino form (tier) the player has ever had in the team or beaten as boss.
+function cleanSeen(seen) {
+  const clean = Array.isArray(seen) ? seen.filter(tier => Number.isInteger(tier) && dinoByTier(tier)) : [];
+  return [...new Set([0, ...clean])].sort((a, b) => a - b);
+}
+
 export function skinById(id) {
   return SKINS.find(skin => skin.id === id) || SKINS[0];
 }
 
 export function readProgress(raw) {
   let value; try { value = JSON.parse(raw); } catch { value = null; }
-  const result = { unlocked:1, best:{}, sound:false, bank:0, skins:['groen'], skin:'groen' };
+  const result = { unlocked:1, best:{}, sound:false, bank:0, skins:['groen'], skin:'groen', seen:[0] };
   if (!value || typeof value !== 'object') return result;
   const unlocked = Number(value.unlocked);
   if (Number.isInteger(unlocked)) result.unlocked = Math.max(1, Math.min(100, unlocked));
@@ -27,7 +35,14 @@ export function readProgress(raw) {
   if (Number.isInteger(value.bank)) result.bank = Math.max(0, Math.min(MAX_BANK, value.bank));
   if (Array.isArray(value.skins)) result.skins = ['groen', ...new Set(value.skins.filter(id => SKIN_IDS.has(id) && id !== 'groen'))];
   if (result.skins.includes(value.skin)) result.skin = value.skin;
+  // v2 test builds kept a persistent `team`; those forms count as discovered.
+  result.seen = cleanSeen([...(Array.isArray(value.seen) ? value.seen : []), ...(Array.isArray(value.team) ? value.team : [])]);
   return result;
+}
+// Returns the same object when nothing new was discovered, so callers can skip saving.
+export function discover(progress, tiers) {
+  const seen = cleanSeen([...progress.seen, ...(Array.isArray(tiers) ? tiers : [])]);
+  return seen.length === progress.seen.length ? progress : { ...progress, seen };
 }
 export function completeLevel(progress, number, rating) {
   if (!Number.isInteger(number) || number < 1 || number > 100 || number > progress.unlocked) return progress;
