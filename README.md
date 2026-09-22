@@ -8,4 +8,4 @@ Een kleurrijke 3D-dinosaurusrunner voor iPad, iPhone en computer: rekruteer en e
 2. Kies Delen → Zet op beginscherm.
 3. Open de game vanaf het beginscherm; daarna werkt hij ook offline.
 
-Deze repository bevat alleen de gepubliceerde gamebestanden (v2.2.0). Three.js r160 staat onder de MIT-licentie (`vendor/LICENSE.txt`).
+Deze repository bevat alleen de gepubliceerde gamebestanden (v2.3.0). Three.js r160 staat onder de MIT-licentie (`vendor/LICENSE.txt`).

@@ -24,12 +24,13 @@ const catalog = [
   ['Eilanddrager', 3.50, 0x39705c, 0xd8d09b, 0xffcf57, 'longneck', false, 'De grootste vorm: een kalme oerreus met rotsrug, boomkruinpatroon en een eindeloze nek.']
 ];
 
-// Dino level = tier + 1. Power doubles per level (Lv 1 = 1, Lv 6 = 32, Lv 21 = 1.048.576),
-// so evolving two equal dinos into one of the next level never loses power; it frees a team slot.
+// Dino level = tier + 1, and power = level (Lv 1 = 1, Lv 6 = 6, Lv 21 = 21). Evolving two equal
+// dinos gives one dino of the next level, so +1 power for that dino: two Lv 5 (5 + 5) become one
+// Lv 6 (6). Evolving frees a team slot but makes the team weaker (v2.3).
 export const MAX_LEVEL = catalog.length;
 
 export function levelPower(level) {
-  return 2 ** (level - 1);
+  return level;
 }
 
 export const DINOS = Object.freeze(catalog.map(([name, size, body, belly, spikes, shape, flying, description], tier) => {

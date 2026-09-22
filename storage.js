@@ -12,6 +12,9 @@ export const SKINS = Object.freeze([
 const SKIN_IDS = new Set(SKINS.map(skin => skin.id));
 const MAX_BANK = 1_000_000;
 const MAX_TEAM = 9;
+// v2.3 changed the power rules (power = level). A team saved under older rules (no or another
+// teamVersion) is not loaded; the game then gives a team that fits the unlocked level.
+export const TEAM_VERSION = 3;
 
 // The collection book: every dino form (tier) the player has ever had in the team or beaten as boss.
 function cleanSeen(seen) {
@@ -30,7 +33,7 @@ export function skinById(id) {
 
 export function readProgress(raw) {
   let value; try { value = JSON.parse(raw); } catch { value = null; }
-  const result = { unlocked:1, best:{}, sound:false, bank:0, skins:['groen'], skin:'groen', seen:[0], team:null };
+  const result = { unlocked:1, best:{}, sound:false, bank:0, skins:['groen'], skin:'groen', seen:[0], team:null, teamVersion:TEAM_VERSION };
   if (!value || typeof value !== 'object') return result;
   const unlocked = Number(value.unlocked);
   if (Number.isInteger(unlocked)) result.unlocked = Math.max(1, Math.min(100, unlocked));
@@ -41,8 +44,10 @@ export function readProgress(raw) {
   if (Number.isInteger(value.bank)) result.bank = Math.max(0, Math.min(MAX_BANK, value.bank));
   if (Array.isArray(value.skins)) result.skins = ['groen', ...new Set(value.skins.filter(id => SKIN_IDS.has(id) && id !== 'groen'))];
   if (result.skins.includes(value.skin)) result.skin = value.skin;
-  result.team = cleanTeam(value.team);
-  result.seen = cleanSeen([...(Array.isArray(value.seen) ? value.seen : []), ...(result.team || [])]);
+  // Forms of an old team still count as discovered, even when the team itself is not loaded.
+  const savedTeam = cleanTeam(value.team);
+  result.team = value.teamVersion === TEAM_VERSION ? savedTeam : null;
+  result.seen = cleanSeen([...(Array.isArray(value.seen) ? value.seen : []), ...(savedTeam || [])]);
   return result;
 }
 // Stores the team as it is now (wins, losses and merges all count) and adds its forms to the collection book.

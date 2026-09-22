@@ -54,3 +54,6 @@
 .fighting #hud .power-strip,.fighting #team-toggle,.fighting #game-hint,.fighting .touch-controls,.fighting #shield-badge{display:none!important}
 @media(max-width:700px),(max-width:950px) and (orientation:portrait){#fight{top:max(74px,calc(env(safe-area-inset-top) + 58px));gap:8px;padding:10px 12px 12px}.fighter strong{font-size:20px}.fight-vs{font-size:17px}.fighter .hp{height:14px}.journey em{font-size:10px}}
 @media(prefers-reduced-motion:reduce){.fighter.hit,.dmg{animation:none}.dmg{display:none}}
+/* v2.3: one-tap best choice for a full team. */
+#recruit-offer .primary{width:auto;margin:6px auto 0;justify-content:center;min-height:44px;padding:10px 18px;font-size:14px}
+@media(max-width:700px),(max-width:950px) and (orientation:portrait){#recruit-offer .primary{font-size:12px;min-height:40px;padding:8px 12px}}

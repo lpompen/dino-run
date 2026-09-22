@@ -1,6 +1,6 @@
 import { DINOS, MAX_LEVEL, dinoByTier, levelPower } from './dinos.js';
 
-export const VERSION = '2.2.0';
+export const VERSION = '2.3.0';
 
 export const WORLDS = Object.freeze([
   { name: 'Palmenbaai', sky: '#65d8ff', water: '#169bd5', ground: '#f4cf67', accent: '#ff5f57' },
@@ -36,10 +36,8 @@ const FIGHT_INTRO = 1.1;
 const FIGHT_EXCHANGE = 0.9;
 const FIGHT_OUTRO = 0.8;
 const FIGHT_SWING = Object.freeze([1.15, 0.8, 1.05, 0.9, 1.25, 0.85, 1.1, 0.95, 1.2, 0.75]);
-// A boss is several times as strong as a normal dino of its own level.
-const BOSS_MULTIPLIERS = Object.freeze([2, 2.5, 3, 3.5]);
 const HELPER_FLOOR = 0.9;
-const HELPER_RETRY_STEP = 0.02;
+const HELPER_RETRY_STEP = 0.03;
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -54,64 +52,86 @@ function validateLevelNumber(number) {
 const sumPower = tiers => tiers.reduce((sum, tier) => sum + (dinoByTier(tier)?.power || 0), 0);
 
 /**
- * Economy
- * -------
- * The team travels with the player from level to level. REFERENCE follows a player who
- * beats every rival on the route: the power they bring into a level, the rivals of that
- * level and the power at the finish. Team power grows along a smooth curve from 17 after
- * level 1 to about four million after level 100 (a few Lv 21 dinos).
+ * Economy (v2.3: power = level)
+ * -----------------------------
+ * The team travels with the player from level to level. Every level has two rivals, one on
+ * each fork: a dino of the island's own level and one level above (Lv 1-2 in level 1, Lv
+ * 19-20 in level 100). With at most nine team members a team grows by swapping its weakest
+ * dino for a better newcomer, so it settles at about nine dinos of the current island.
  *
- * The boss asks a share of the reference power at the finish; the rest is room for missed
- * rivals and dinos lost to traps. Its dino level is chosen so that it is 2 to 7 times (on
- * average about 4 times) as strong as a normal dino of that level: only the whole team
- * together can beat it.
+ * REFERENCE follows a player who beats every rival and handles a full team well (swap the
+ * weakest, or merge the weakest pair when that is one better). The boss asks a share of
+ * that player's power at the finish; the rest is room for a missed rival or a trap. Its
+ * dino level is two above the rivals (at most half its power), so it is several times (on
+ * average about six times) as strong as a normal dino of its own level: only the whole
+ * team together can beat it.
  */
-function targetPower(number) {
-  return 2 ** (4.1 + 17.9 * ((number - 1) / 99) ** 0.75);
+function rivalLevel(number) {
+  return 1 + Math.round(18 * ((number - 1) / 99) ** 0.8);
 }
 
-// Share of the reference power the boss does not ask: generous at the start, tight at the end.
+// Share of the reference power the boss does not ask: a little room at the start, very little at the end.
 export function slackFor(number) {
-  return 0.3 - 0.12 * (number - 1) / 99;
+  return 0.16 - 0.1 * (number - 1) / 99;
 }
 
-// Level offsets around a base level for three or four rivals, in rising order. Their
-// weights (sum of 2^offset) cover a whole doubling, so a level's total can follow the
-// growth curve closely instead of jumping by powers of two.
-const RIVAL_SHAPES = Object.freeze({
-  3: [[-1, 0, 1], [0, 0, 1], [-1, 1, 1], [0, 1, 1], [-1, 0, 2], [0, 0, 2]],
-  4: [[-1, -1, 0, 1], [-1, 0, 0, 1], [0, 0, 0, 1], [-1, 0, 1, 1], [0, 0, 1, 1], [-1, 0, 0, 2], [0, 1, 1, 1]]
-});
+// Two rivals per level (tiers): the island's own level and one above.
+function planRivals(number) {
+  const tier = rivalLevel(number) - 1;
+  return [tier, Math.min(MAX_TIER, tier + 1)];
+}
 
-// Three or four rivals per level whose power adds up to the growth of that level.
-function planRivals(number, start) {
-  if (number === 1) return [0, 1, 2, 3];
-  const wanted = Math.max(1, targetPower(number) - start);
-  let best = null;
-  for (const shape of RIVAL_SHAPES[number % 3 === 0 ? 3 : 4]) {
-    const weight = shape.reduce((sum, offset) => sum + 2 ** offset, 0);
-    for (const base of [Math.floor(Math.log2(wanted / weight)), Math.ceil(Math.log2(wanted / weight))]) {
-      const tiers = shape.map(offset => clamp(base + offset, 0, MAX_TIER));
-      const miss = Math.abs(Math.log(sumPower(tiers) / wanted));
-      if (!best || miss < best.miss - 1e-9) best = { tiers, miss };
-    }
+/**
+ * The best way to take a newcomer (tier t) into a team, as { action, gain, ... }:
+ * - 'join': a free slot.
+ * - 'evolve': the newcomer merges with a team dino of its own level (Lv t+1): +1.
+ * - 'replace': the weakest dino (tier w) makes way: t − w.
+ * - 'merge': the weakest equal pair (tier v) evolves to make room (one Lv v+1 instead of
+ *   two Lv v), then the newcomer joins: (v + 2) + (t + 1) − 2(v + 1) = t + 1 − v.
+ * - 'release': every option would make the team weaker (gain ≤ 0).
+ * The reference player, the tests and the "best choice" button in the team panel all use it.
+ */
+export function planRecruit(team, tier) {
+  if (team.length < MAX_TEAM) return { action: 'join', gain: tier + 1 };
+  let best = { action: 'release', gain: 0 };
+  const same = team.indexOf(tier);
+  if (same !== -1 && tier < MAX_TIER) best = { action: 'evolve', gain: 1, index: same };
+  const weakest = Math.min(...team);
+  if (weakest !== tier && tier - weakest > best.gain) best = { action: 'replace', gain: tier - weakest, index: team.indexOf(weakest) };
+  const pair = [...new Set(team)].sort((a, b) => a - b).find(value => value < MAX_TIER && team.indexOf(value) !== team.lastIndexOf(value));
+  if (pair !== undefined && tier + 1 - pair > best.gain) best = { action: 'merge', gain: tier + 1 - pair, pair: [team.indexOf(pair), team.lastIndexOf(pair)] };
+  return best;
+}
+
+// Applies planRecruit to a plain team array (the reference player); returns the plan.
+export function addToTeam(team, tier) {
+  const plan = planRecruit(team, tier);
+  if (plan.action === 'join') team.push(tier);
+  else if (plan.action === 'evolve') team[plan.index] = tier + 1;
+  else if (plan.action === 'replace') team[plan.index] = tier;
+  else if (plan.action === 'merge') {
+    const [keep, remove] = plan.pair;
+    team[keep] += 1;
+    team.splice(remove, 1);
+    team.push(tier);
   }
-  return best.tiers;
+  return plan;
 }
 
 const REFERENCE = (() => {
   const table = [];
-  let start = LEADER_POWER + 1;
+  const team = [...START_TEAM];
   let bossLevel = 1;
   for (let number = 1; number <= 100; number += 1) {
-    const rivals = Object.freeze(planRivals(number, start));
-    const end = start + sumPower(rivals);
+    const startTeam = Object.freeze([...team].sort((a, b) => b - a));
+    const start = LEADER_POWER + sumPower(team);
+    const rivals = Object.freeze(planRivals(number));
+    for (const tier of rivals) addToTeam(team, tier);
+    const end = LEADER_POWER + sumPower(team);
     const bossPower = Math.round(end * (1 - slackFor(number)));
-    const multiplier = BOSS_MULTIPLIERS[(number + 3) % BOSS_MULTIPLIERS.length];
-    // Boss levels never go down from one level to the next.
-    bossLevel = clamp(Math.max(bossLevel, Math.floor(Math.log2(bossPower / multiplier)) + 1), 1, MAX_LEVEL);
-    table.push(Object.freeze({ start, rivals, end, bossPower, bossLevel }));
-    start = end;
+    // Two levels above the rivals, never more than half its power, and never lower than the previous boss.
+    bossLevel = clamp(Math.max(bossLevel, Math.min(rivalLevel(number) + 2, Math.floor(bossPower / 2))), 1, MAX_LEVEL);
+    table.push(Object.freeze({ start, startTeam, rivals, end, bossPower, bossLevel }));
   }
   return Object.freeze(table);
 })();
@@ -121,28 +141,10 @@ export function bossLevelFor(number) {
   return REFERENCE[number - 1].bossLevel;
 }
 
-/**
- * A team with the reference power at the start of a level, for players whose save has no
- * team yet (v2.1 and older) and for tests. Power sits in a few big dinos plus some small
- * ones in front of them, because traps take the smallest dino first.
- */
+// The reference team at the start of a level (strongest first): for saves from before v2.3 and for tests.
 export function referenceTeam(number) {
   validateLevelNumber(number);
-  let rest = REFERENCE[number - 1].start - LEADER_POWER;
-  const team = [];
-  while (rest >= 1 && team.length < MAX_TEAM) {
-    const tier = Math.min(MAX_TIER, Math.floor(Math.log2(rest)));
-    team.push(tier);
-    rest -= levelPower(tier + 1);
-  }
-  while (team.length < 6) {
-    const smallest = team.reduce((best, tier, index) => tier > 0 && (best < 0 || tier < team[best]) ? index : best, -1);
-    if (smallest < 0) break;
-    team[smallest] -= 1;
-    team.push(team[smallest]);
-  }
-  team.sort((left, right) => right - left);
-  return team.length ? team : [...START_TEAM];
+  return [...REFERENCE[number - 1].startTeam];
 }
 
 // Traps knock dinos out of the team, smallest first: rocks, logs and red gates one, lava two.
@@ -163,40 +165,38 @@ function sanitizeTeam(team) {
 }
 
 /**
- * Safety net. Traps take dinos for good, and they take the smallest first, which are
- * usually the rivals just won. A team can therefore shrink over many levels until the
- * next boss (or even the rivals) is out of reach for good. A team that starts a level
- * below HELPER_FLOOR of the boss power gets up to three helper dinos, up to that floor
- * (never above the reference start, so level 1 always starts small). From the floor a
- * team still has to win most rivals of the level without many traps to beat the boss.
- * Every failed try of the same level (`retries`) lifts the floor a little, up to the boss
- * power itself after five: then keeping more than the traps take is enough.
+ * Safety net. Traps take dinos for good, and there are only two rivals per level to win
+ * them back. A team can therefore shrink over many levels until the next boss is out of
+ * reach for good. A team that starts a level below HELPER_FLOOR of the boss power gets
+ * helper dinos (as many as needed, up to that floor; never above the reference start, so
+ * level 1 always starts small); in a full team a helper takes the place of a weaker dino.
+ * From the floor a team still needs a good run to beat the boss. Every failed try of the
+ * same level (`retries`) lifts the floor by 3% of the boss, after many tries a little past
+ * the boss (never past the reference team), so nobody stays stuck on one level.
  */
 export function helpersFor(number, team, retries = 0) {
   validateLevelNumber(number);
   const reference = REFERENCE[number - 1];
-  const share = Math.min(1, HELPER_FLOOR + HELPER_RETRY_STEP * Math.max(0, Math.floor(retries) || 0));
+  // After many failed tries the floor may pass the boss a little, up to the reference team.
+  const share = Math.min(1.2, HELPER_FLOOR + HELPER_RETRY_STEP * Math.max(0, Math.floor(retries) || 0));
   const floor = Math.round(Math.min(reference.start, reference.bossPower * share));
+  // Helpers have the level of a typical dino in the reference team (the middle one), so they can
+  // also lift a full team of older, weaker dinos.
+  const tier = Math.max(reference.rivals[0], reference.startTeam[Math.floor(reference.startTeam.length / 2)]);
   const result = [...team];
   const helpers = [];
   let power = LEADER_POWER + sumPower(result);
-  for (let k = 0; k < 3 && power < floor; k += 1) {
-    const tier = clamp(Math.floor(Math.log2(floor - power)), 0, MAX_TIER);
-    if (result.length >= MAX_TEAM) {
-      const ascending = result.map((value, index) => [value, index]).sort((a, b) => a[0] - b[0]);
-      const pair = ascending.findIndex(([value], index) => index + 1 < ascending.length && value === ascending[index + 1][0] && value < MAX_TIER);
-      if (pair >= 0) {
-        const [keep, remove] = [ascending[pair][1], ascending[pair + 1][1]].sort((a, b) => a - b);
-        result[keep] += 1;
-        result.splice(remove, 1);
-      } else if (tier > ascending[0][0]) {
-        power -= levelPower(ascending[0][0] + 1);
-        result.splice(ascending[0][1], 1);
-      } else break;
-    }
+  // Helpers join while they fit under the floor, so helpers alone never lift a team above it.
+  while (helpers.length < MAX_TEAM) {
+    const full = result.length >= MAX_TEAM;
+    const weakest = full ? Math.min(...result) : -1;
+    if (full && weakest >= tier) break;
+    const gain = levelPower(tier + 1) - (full ? levelPower(weakest + 1) : 0);
+    if (power + gain > floor) break;
+    if (full) result.splice(result.indexOf(weakest), 1);
     result.push(tier);
     helpers.push(tier);
-    power += levelPower(tier + 1);
+    power += gain;
   }
   return { team: result, helpers };
 }
@@ -274,6 +274,20 @@ export function resolveRecruit(run, replaceIndex = null) {
   return true;
 }
 
+// The best choice for a newcomer waiting at a full team (see planRecruit), or null.
+export function bestRecruit(run) {
+  return run && dinoByTier(run.pendingRecruit) ? planRecruit(run.team, run.pendingRecruit) : null;
+}
+
+export function applyBestRecruit(run) {
+  const plan = bestRecruit(run);
+  if (!plan) return false;
+  if (plan.action === 'release') return resolveRecruit(run, null);
+  if (plan.action === 'evolve' || plan.action === 'replace') return resolveRecruit(run, plan.index);
+  if (plan.action === 'merge') return mergeTeam(run, plan.pair[0], plan.pair[1]);
+  return false;
+}
+
 function mulberry32(seed) {
   return function random() {
     let value = seed += 0x6D2B79F5;
@@ -303,10 +317,10 @@ function pushEvent(run, type, message) {
  * `steer(run, point.lane)` and, when `jump` is true, call `jump(run)` once.
  * Route data is guidance, never special-cased by the simulation.
  *
- * Dinos on the road: only the three or four rivals of the level, two of them on
- * the bridges of the forks. (A red dino that the team cannot beat would have to be
- * more than twice the team, and so stronger than the boss; v2.2 has none. A team
- * far below the reference can still meet a rival it cannot beat.)
+ * Dinos on the road: only the two rivals of the level, one on the recruit bridge of
+ * each fork. (A red dino that the team cannot beat would have to be more than twice
+ * the team, and so stronger than the boss; there are none. A team far below the
+ * reference can still meet a rival it cannot beat.)
  */
 export function generateLevel(number) {
   validateLevelNumber(number);

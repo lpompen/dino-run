@@ -1,5 +1,5 @@
-// Dino Run v2.2.0 — touch, UI, local progress and runtime diagnostics.
-import { VERSION, WORLDS, createRun, steer, jump, tick, stars, teamPower, mergeTeam, resolveRecruit, fightBoss, strongestLevel, referenceTeam } from './engine.js';
+// Dino Run v2.3.0 — touch, UI, local progress and runtime diagnostics.
+import { VERSION, WORLDS, createRun, steer, jump, tick, stars, teamPower, mergeTeam, resolveRecruit, fightBoss, strongestLevel, referenceTeam, bestRecruit, applyBestRecruit } from './engine.js';
 import { DinoRenderer } from './renderer.js';
 import { readProgress, completeLevel, addCoins, buySkin, selectSkin, SKINS, skinById, discover, keepTeam } from './storage.js';
 
@@ -307,9 +307,10 @@ function updateTeamStrip() {
     const tier = run.team[index];
     return tier === undefined ? '<i class="empty-slot">·</i>' : `<i title="${dinoByTier(tier).name}">${dinoPortrait(dinoByTier(tier))}<small>Lv${tier + 1}</small></i>`;
   }).join('');
-  const pair = mergePair();
-  $('team-action').textContent = pair ? '✦ Evolutie mogelijk' : `Team ${run.team.length}/9 · beheren`;
-  $('team-toggle').classList.toggle('can-merge', !!pair);
+  // Evolving costs power now (two Lv N become one Lv N+1), so the strip no longer invites it;
+  // a full team gets its choice when a newcomer arrives.
+  $('team-action').textContent = `Team ${run.team.length}/9 · beheren`;
+  $('team-toggle').classList.remove('can-merge');
 }
 function teamCard(tier, index, isAtlas = false) {
   const dino = dinoByTier(tier), card = document.createElement(isAtlas ? 'article' : 'button');
@@ -327,8 +328,11 @@ function teamCard(tier, index, isAtlas = false) {
     const incoming = run.pendingRecruit;
     if (incoming !== null && incoming !== undefined) {
       const merge = incoming === tier && tier < 20;
+      const gain = merge ? 1 : incoming - tier;
       card.classList.toggle('match', merge);
-      const action = document.createElement('em'); action.textContent = merge ? `Samen → Lv ${tier + 2} ${dinoByTier(tier + 1).name}` : 'Vervangen door nieuwkomer'; card.append(action);
+      const action = document.createElement('em');
+      action.textContent = merge ? `Samen → Lv ${tier + 2} (⚡ +1)` : `Vervangen door nieuwkomer (⚡ ${gain > 0 ? '+' : gain < 0 ? '−' : '±'}${Math.abs(gain)})`;
+      card.append(action);
       card.setAttribute('aria-label', `${dino.name}, ${action.textContent}`);
       card.onclick = () => {
         if (performance.now() < suppressTeamClickUntil) return;
@@ -364,13 +368,26 @@ function renderTeamMenu() {
   $('team-done').textContent = boss ? (enough ? '⚔ Vecht tegen de eindbaas!' : `⚔ Toch vechten (⚡ ${powerText(power)} tegen ⚡ ${powerText(bossPower)})`) : 'Klaar · verder ➜';
   $('team-done').className = boss && enough ? 'primary' : 'secondary';
   $('team-dialog').classList.toggle('boss-prep', boss);
-  $('team-merge').hidden = false;
+  // At the boss evolving would only weaken the team, so the button is hidden there.
+  $('team-merge').hidden = boss;
   $('team-merge').disabled = !mergePair();
   $('team-instruction').textContent = boss
-    ? enough ? 'Samen zijn jullie sterk genoeg. Evolueren mag nog (dat maakt plek, de kracht blijft gelijk). Vecht!'
+    ? enough ? 'Samen zijn jullie sterk genoeg. Vecht!'
       : `Jullie komen ⚡ ${powerText(bossPower - power)} tekort. Vecht toch: de dino’s die je versloeg blijven in je team voor de volgende poging.`
-    : pending ? (mergePair() ? 'Je team is vol. Voeg twee gelijke dino’s samen (slepen of de knop): dan komt er plek en sluit de nieuwkomer aan. Je kunt de nieuwkomer ook op een gelijke dino slepen, of een teamlid aantikken om te vervangen.' : 'Je team is vol. Sleep de nieuwkomer op een dino van hetzelfde level, of tik op een teamlid om het te vervangen; vrijlaten kan ook.') : selectedSlot === null ? 'Sleep een dino op een dino van hetzelfde level: samen worden ze 1 level hoger en je houdt een plek vrij. Twee keer tikken werkt ook.' : run.team[selectedSlot] === 20 ? 'Deze dino is Lv 21: het hoogste level.' : `Sleep op nog een Lv ${run.team[selectedSlot] + 1}. Groen omlijnde dino’s passen bij elkaar.`;
+    : pending ? 'Je team is vol. ✦ Beste keuze doet het slimste (meestal: je zwakste dino vervangen). Je kunt ook zelf een teamlid aantikken. Samenvoegen maakt plek, maar kost kracht: twee Lv 5 (⚡ 10) worden één Lv 6 (⚡ 6).'
+      : selectedSlot === null ? 'Sleep een dino op een dino van hetzelfde level: samen worden ze 1 level hoger (⚡ +1), maar je team verliest de kracht van de tweede. Handig als je team vol is. Twee keer tikken werkt ook.'
+        : run.team[selectedSlot] === 20 ? 'Deze dino is Lv 21: het hoogste level.' : `Sleep op nog een Lv ${run.team[selectedSlot] + 1}. Groen omlijnde dino’s passen bij elkaar.`;
   if (pending) $('incoming-dino').innerHTML = `${dinoPortrait(dinoByTier(incoming))}<div><small>WIL BIJ JOUW TEAM</small><strong>${dinoByTier(incoming).name}</strong><span>Lv ${incoming + 1} · ⚡ ${powerText(dinoByTier(incoming).power)}</span></div>`;
+  if (pending) {
+    const plan = bestRecruit(run);
+    const what = {
+      evolve: `samen met je Lv ${incoming + 1} → Lv ${incoming + 2}`,
+      replace: `vervang je Lv ${(run.team[plan.index] ?? 0) + 1}`,
+      merge: `voeg je twee Lv ${(run.team[plan.pair?.[0]] ?? 0) + 1} samen, dan kan hij erbij`,
+      release: 'laat hem gaan, je team is al sterker'
+    }[plan.action] || 'neem hem erbij';
+    $('best-recruit').textContent = `✦ Beste keuze: ${what}${plan.gain > 0 ? ` (⚡ +${plan.gain})` : ''}`;
+  }
   if (pending) bindDinoDrag($('incoming-dino'),-1,incoming);
   const grid = $('team-grid'); grid.replaceChildren();
   run.team.forEach((tier, index) => grid.append(teamCard(tier, index)));
@@ -406,6 +423,13 @@ $('team-toggle').onclick = openTeam;
 $('team-close').onclick = $('team-done').onclick = closeTeam;
 $('team-dialog').addEventListener('cancel', event => { event.preventDefault(); if (run.status !== 'boss') closeTeam(); });
 $('release-recruit').onclick = () => { const tier = run.pendingRecruit; resolveRecruit(run, null); log('recruit-released', {tier}); renderTeamMenu(); closeTeam(); };
+// One tap for a full team: the same choice the reference player (and the balance tests) make.
+$('best-recruit').onclick = () => {
+  const incoming = run.pendingRecruit, plan = bestRecruit(run);
+  if (!plan || !applyBestRecruit(run)) return;
+  syncTeam(); log('recruit-best', { incoming, action: plan.action, gain: plan.gain, team: run.team });
+  tone(plan.action === 'release' ? 'collect' : 'win'); selectedSlot = null; renderTeamMenu(); updateGameUI(); closeTeam();
+};
 $('team-merge').onclick = () => { const pair = mergePair(); if (pair) evolvePair(...pair); };
 function openAtlas() {
   const grid = $('atlas-grid'); grid.replaceChildren();

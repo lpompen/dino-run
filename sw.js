@@ -1,4 +1,4 @@
-const CACHE = 'dino-run-v2.2.0-3a15d164fedf';
+const CACHE = 'dino-run-v2.3.0-06b8a26ab7e4';
 const FILES = ['./','index.html','style.css','game.js','engine.js','renderer.js','storage.js','dinos.js','portraits.js','vendor/three.module.js','manifest.webmanifest','assets/icon.svg','assets/icon-180.png','assets/icon-192.png','assets/icon-512.png'];
 self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES.map(file=>new Request(file,{cache:'reload'}))))); });
 self.addEventListener('message', event => { if(event.data?.type === 'ACTIVATE') self.skipWaiting(); });
