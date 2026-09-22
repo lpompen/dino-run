@@ -56,6 +56,11 @@ export function dinoScale(power) {
   return THREE.MathUtils.clamp(0.78 + Math.sqrt(Math.max(0, power || 0)) * 0.075, 0.9, 1.9);
 }
 
+function compactPower(value) {
+  const rounded = Math.max(0, Math.round(value || 0));
+  return new Intl.NumberFormat('nl-NL', { notation: rounded >= 100000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(rounded);
+}
+
 function markShadows(root) {
   root.traverse((node) => {
     if (node.isMesh) {
@@ -108,6 +113,9 @@ export class DinoRenderer {
     this.cameraLook = new THREE.Vector3();
     // Team view: camera offsets relative to the leader (tuned in the browser via ?qa).
     this.teamCam = { x: 20, y: 11.5, z: 1.2, lookY: -4.1, lookZ: -1.6, portraitX: 24, portraitY: 13, portraitZ: 0.4, portraitLookY: -10, portraitLookZ: -0.4 };
+    // Boss fight: side view on the team and the boss together.
+    this.fightCam = { x: 18, y: 8, z: 2.5, lookY: 2.4, lookZ: -1.2, portraitX: 25, portraitY: 11.2, portraitZ: 1.3, portraitLookY: -1.3, portraitLookZ: -2.2 };
+    this.fightPose = null;
     this.currentPalette = PALETTES[0];
     this.geometries = this._createGeometries();
     this.materials = this._createMaterials(this.currentPalette);
@@ -515,12 +523,17 @@ export class DinoRenderer {
     this.world.add(this.finishSet);
     const bossSpec = dinoByTier(level.bossTier ?? 0) || dinoByTier(0);
     this.boss = this._createDino({ body: bossSpec.body || 0xe95750, belly: bossSpec.belly || 0xffb064, spikes: bossSpec.spikes || 0x67234b, size: 1, spec: bossSpec });
-    this.bossScale = Math.max(1.12, 0.94 + (Number(bossSpec.size) || 1) * .56);
+    // A boss is several times as strong as a normal dino of its level, and looks it.
+    const multiplier = Math.max(1, (level.bossPower || bossSpec.power) / bossSpec.power);
+    this.bossScale = Math.max(1.12, 0.94 + (Number(bossSpec.size) || 1) * .56) * (1 + 0.12 * Math.log2(multiplier));
     this.boss.root.scale.setScalar(this.bossScale);
-    this.boss.root.position.set(0, 0, -Math.max(24, level.length || 100) - BOSS_GAP);
+    // Giant bosses stand further back, so they do not overlap the team in the fight.
+    this.bossGapExtra = Math.max(0, this.bossScale - 1.5) * 1.8;
+    this.bossBaseZ = -Math.max(24, level.length || 100) - BOSS_GAP - this.bossGapExtra;
+    this.boss.root.position.set(0, 0, this.bossBaseZ);
     this.boss.root.rotation.y = Math.PI;
     this.world.add(this.boss.root);
-    this._setBossLabel(`Lv ${level.bossLevel ?? (level.bossTier ?? 0) + 1}`);
+    this._setBossLabel(level.bossLevel ?? bossSpec.level, level.bossPower ?? bossSpec.power);
   }
 
   _clearForks() {
@@ -590,7 +603,12 @@ export class DinoRenderer {
       }
       const { x: baseX, z: baseZ } = this._teamSlot(index, menu, distance, run);
       const flying = Boolean(dino.root.userData.flying);
-      dino.root.position.set(baseX, flying ? 1.65 + Math.sin(this.clockTime * 7 + index) * .18 : 0, baseZ);
+      // Boss fight: the team charges together; knocked-out dinos lie on their side (until a win).
+      const pose = menu ? null : this.fightPose;
+      const fainted = Boolean(pose?.fainted.has(index));
+      const lunge = pose && !fainted ? pose.lunge * (1.2 + (index % 3) * 0.15) : 0;
+      const flyY = fainted ? 0.2 : 1.65 + Math.sin(this.clockTime * 7 + index) * .18;
+      dino.root.position.set(baseX, flying ? flyY : 0, baseZ - lunge);
       dino.root.rotation.y = menu ? Math.PI : 0;
       const size = Number((dinoByTier(tier) || {}).size) || 1;
       // Evolving: the new dino pops up from small with a little overshoot and a white glow.
@@ -598,13 +616,46 @@ export class DinoRenderer {
       const pop = merge ? 0.25 + 0.75 * this._easeOutBack(Math.min(1, merge.t / 0.55)) : 1;
       dino.root.scale.setScalar((menu ? .5 : .52) * size * pop);
       const glow = merge ? Math.max(0, 1 - merge.t / 0.7) : 0;
+      const flash = pose ? pose.flash : 0;
       for (const material of dino.materials || []) {
         if (!material.emissive) continue;
-        material.emissive.setRGB(1, 0.95, 0.7);
-        material.emissiveIntensity = glow * 0.9;
+        if (flash > glow) {
+          material.emissive.setRGB(1, 0.15, 0.1);
+          material.emissiveIntensity = flash * 0.7;
+        } else {
+          material.emissive.setRGB(1, 0.95, 0.7);
+          material.emissiveIntensity = glow * 0.9;
+        }
       }
-      this._animateDino(dino, this.clockTime + index * .33, run.status === 'running' ? .78 : .2);
+      this._animateDino(dino, this.clockTime + index * .33, fainted ? 0 : run.status === 'running' || lunge > 0 ? .78 : .2);
+      if (fainted) dino.rig.rotation.z = (index % 2 ? -1 : 1) * 1.35;
     });
+  }
+
+  // During the boss fight: who strikes right now, and which (smallest) dinos are knocked out.
+  _fightPose(run) {
+    const fight = run.fight;
+    if (!fight) return null;
+    const hit = fight.next > 0 ? fight.hits[fight.next - 1] : null;
+    const since = hit && run.status === 'fight' ? fight.time - hit.at : Infinity;
+    const pulse = since >= 0 && since < 0.45 ? Math.sin(Math.PI * since / 0.45) : 0;
+    const fainted = new Set();
+    if (run.status !== 'won') {
+      let lost = fight.teamMax - fight.teamHp;
+      const order = (run.team || []).map((tier, index) => [dinoByTier(tier)?.power || 0, index]).sort((a, b) => a[0] - b[0]);
+      for (const [power, index] of order) {
+        if (power > lost) break;
+        lost -= power;
+        fainted.add(index);
+      }
+    }
+    return {
+      lunge: hit?.side === 'team' ? pulse : 0,
+      flash: hit?.side === 'boss' ? pulse : 0,
+      bossLunge: hit?.side === 'boss' ? pulse : 0,
+      bossFlash: hit?.side === 'team' ? pulse : 0,
+      fainted
+    };
   }
 
   _teamSlot(index, menu, distance, run) {
@@ -718,13 +769,38 @@ export class DinoRenderer {
     return markShadows(root);
   }
 
-  _setBossLabel(text) {
+  // Two lines above the boss: its dino level, and its (much bigger) power.
+  _setBossLabel(level, power) {
     if (this.bossLabel) {
       this.boss.root.remove(this.bossLabel);
       this._disposeLabel(this.bossLabel);
     }
-    this.bossLabel = this._makeLabel(text, '#ff4d62', 1.45);
-    this.bossLabel.position.set(0, 3.65, 0);
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 160;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(255,255,255,.96)';
+    ctx.strokeStyle = '#ff4d62';
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(18, 10, 220, 138, 38);
+    else ctx.rect(18, 10, 220, 138);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ff4d62';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '900 30px system-ui, sans-serif';
+    ctx.fillText(`EINDBAAS LV ${level}`, 128, 45, 196);
+    ctx.font = '900 54px system-ui, sans-serif';
+    ctx.fillText(`⚡ ${compactPower(power)}`, 128, 102, 200);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
+    sprite.scale.set(2.2 * 1.3, 1.375 * 1.3, 1);
+    sprite.userData.labelTexture = texture;
+    this.bossLabel = sprite;
+    this.bossLabel.position.set(0, 3.8, 0);
     this.boss.root.add(this.bossLabel);
   }
 
@@ -781,8 +857,7 @@ export class DinoRenderer {
       this.player.root.remove(this.player.label);
       this._disposeLabel(this.player.label);
     }
-    const text = new Intl.NumberFormat('nl-NL', { notation: rounded >= 100000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(rounded);
-    this.player.label = this._makeLabel(text, '#20a952', 0.72);
+    this.player.label = this._makeLabel(compactPower(rounded), '#20a952', 0.72);
     this.player.label.position.set(0, 2.78, 0);
     this.player.root.add(this.player.label);
   }
@@ -1037,6 +1112,9 @@ export class DinoRenderer {
     this._updateEffects(safeDt);
     this._updateTrack(run.distance || 0);
     this._updatePlayerLabel(teamPower(run));
+    this.fightPose = menu ? null : this._fightPose(run);
+    const pose = this.fightPose;
+    const fightView = !menu && !teamView && Boolean(run.fight);
     this._updateTeam(run, menu, run.distance || 0);
     if (!menu) this._updateTeamEffects(run, safeDt);
 
@@ -1047,7 +1125,7 @@ export class DinoRenderer {
     this.hitFlash = Math.max(0, this.hitFlash - safeDt);
     const bodyMaterial = this.player.materials[0];
     bodyMaterial.emissive.setRGB(1, 0.12, 0.08);
-    bodyMaterial.emissiveIntensity = this.hitFlash > 0 ? 0.55 * Math.abs(Math.sin(this.hitFlash * 22)) : 0;
+    bodyMaterial.emissiveIntensity = this.hitFlash > 0 ? 0.55 * Math.abs(Math.sin(this.hitFlash * 22)) : pose ? pose.flash * 0.6 : 0;
 
     // Finale at the boss: won = the boss topples over, lost = your dino is knocked back.
     const finished = !menu && (run.status === 'won' || run.status === 'lost');
@@ -1056,7 +1134,7 @@ export class DinoRenderer {
     const finale = Math.min(1, this.finaleTime / 0.7);
     if (finished && run.status === 'won' && !this.finaleBurst && this.finaleTime > 0.35) {
       this.finaleBurst = true;
-      this._createPickupEffect({ type: 'finale', lane: 0, z: (this.level.length || 0) + BOSS_GAP }, 24);
+      this._createPickupEffect({ type: 'finale', lane: 0, z: -this.bossBaseZ }, 24);
     }
 
     const powerScale = dinoScale(LEADER_VISUAL_POWER);
@@ -1071,35 +1149,44 @@ export class DinoRenderer {
     } else if (finished) {
       playerZ += finale * 2.2;
     }
+    if (pose) playerZ -= pose.lunge * 1.5;
     this.player.root.scale.setScalar(powerScale * menuScale);
     this.player.root.position.set(menuHeroX, playerY, playerZ);
     this.player.root.rotation.y = menu ? Math.PI : 0;
-    if (this.player.label) this.player.label.visible = !menu;
+    if (this.player.label) this.player.label.visible = !menu && !fightView;
     this._animateDino(this.player, this.clockTime, run.status === 'running' ? 1 : 0.25);
     this.player.rig.rotation.x = finished && run.status === 'lost' ? finale * 1.2 : 0;
 
     // Bigger dinosaurs push the camera up and back so the track ahead stays readable.
     const grow = powerScale - 1 + Math.max(0, 0.75 - this.camera.aspect) * 1.2;
-    const shake = this.hitFlash > 0 ? this.hitFlash * 0.35 : 0;
+    const shake = this.hitFlash > 0 ? this.hitFlash * 0.35 : pose ? pose.flash * 0.22 : 0;
     // Team view (team panel open, e.g. before the boss): look at the team from the side so the
     // evolution animation is visible above the panel, with the boss in the background.
     const teamX = this.player.root.position.x;
     const portrait = this.camera.aspect < 0.86;
+    // The fight camera backs off for big bosses and centres between the team and the boss.
+    const fc = this.fightCam;
+    const fightZoom = Math.max(1, (this.bossScale || 1) / 1.9);
+    const fightShift = ((this.bossGapExtra || 0) + 1.5 * Math.max(0, (this.bossScale || 1) - 1.7)) / 2;
     const desiredCamera = menu
       ? narrowMenu
         ? new THREE.Vector3(3.25, 3.05, -distance + 7.25)
         : new THREE.Vector3(6.1, 3.45, -distance + 6.25)
       : teamView
         ? new THREE.Vector3(teamX + (portrait ? this.teamCam.portraitX : this.teamCam.x), portrait ? this.teamCam.portraitY : this.teamCam.y, -distance + (portrait ? this.teamCam.portraitZ : this.teamCam.z))
-        : new THREE.Vector3(this.player.root.position.x * 0.3, 6.85 + grow * 2.15, -distance + 10.2 + grow * 2.6);
+        : fightView
+          ? new THREE.Vector3(teamX + (portrait ? fc.portraitX : fc.x) * fightZoom, (portrait ? fc.portraitY : fc.y) * fightZoom, -distance + (portrait ? fc.portraitZ : fc.z) - fightShift)
+          : new THREE.Vector3(this.player.root.position.x * 0.3, 6.85 + grow * 2.15, -distance + 10.2 + grow * 2.6);
     const look = menu
       ? narrowMenu
         ? new THREE.Vector3(0, 1.25, -distance)
         : new THREE.Vector3(-0.45, 1.35, -distance)
       : teamView
         ? new THREE.Vector3(teamX, portrait ? this.teamCam.portraitLookY : this.teamCam.lookY, -distance + (portrait ? this.teamCam.portraitLookZ : this.teamCam.lookZ))
-        : new THREE.Vector3(this.player.root.position.x * 0.5, 0.8, -distance - 14.8);
-    const follow = 1 - Math.pow(teamView || this.lastTeamView ? 0.02 : 0.002, Math.max(safeDt, 1 / 120));
+        : fightView
+          ? new THREE.Vector3(teamX * 0.3, (portrait ? fc.portraitLookY : fc.lookY) + (fightZoom - 1) * 2.6, -distance + (portrait ? fc.portraitLookZ : fc.lookZ) - fightShift)
+          : new THREE.Vector3(this.player.root.position.x * 0.5, 0.8, -distance - 14.8);
+    const follow = 1 - Math.pow(teamView || fightView || this.lastTeamView ? 0.02 : 0.002, Math.max(safeDt, 1 / 120));
     if (menu || this.lastMenu !== menu) {
       this.camera.position.copy(desiredCamera);
       this.cameraLook.copy(look);
@@ -1120,7 +1207,12 @@ export class DinoRenderer {
       this._animateDino(this.boss, this.clockTime * 0.68, bossDistance < 25 ? 1 : 0.35);
       this.boss.root.rotation.z = Math.sin(this.clockTime * 1.6) * 0.025;
       this.boss.rig.rotation.x = 0;
-      this.boss.root.scale.setScalar(this.bossScale);
+      // Fight: the boss stomps toward the team when it strikes and recoils (red) when it is hit.
+      this.boss.root.position.z = this.bossBaseZ + (pose ? pose.bossLunge * 1.8 - pose.bossFlash * 0.35 : 0);
+      const bossBody = this.boss.materials[0];
+      bossBody.emissive.setRGB(1, 0.12, 0.08);
+      bossBody.emissiveIntensity = pose ? pose.bossFlash * 0.8 : 0;
+      this.boss.root.scale.setScalar(this.bossScale * (1 - (pose ? pose.bossFlash * 0.06 : 0)));
       if (finished && run.status === 'won') {
         const shrink = Math.max(0.05, 1 - Math.max(0, this.finaleTime - 0.9) * 0.9);
         this.boss.rig.rotation.x = finale * 1.45;
@@ -1128,9 +1220,9 @@ export class DinoRenderer {
       } else if (finished) {
         this.boss.root.scale.setScalar(this.bossScale * (1 + Math.sin(Math.min(1, this.finaleTime / 0.5) * Math.PI) * 0.12));
       }
-      if (this.bossLabel) this.bossLabel.visible = !(finished && run.status === 'won' && this.finaleTime > 0.5);
-      // The finish arch and cheering dinos would block the side view on the team panel.
-      this.finishSet.visible = bossDistance < 175 && !teamView;
+      if (this.bossLabel) this.bossLabel.visible = !fightView && !(finished && run.status === 'won' && this.finaleTime > 0.5);
+      // The finish arch and cheering dinos would block the side view on the team panel and the fight.
+      this.finishSet.visible = bossDistance < 175 && !teamView && !fightView;
       for (const child of this.finishSet.children) {
         if (child.userData.finishDino) this._animateDino(child.userData.finishDino, this.clockTime + child.position.x, 0.7);
       }

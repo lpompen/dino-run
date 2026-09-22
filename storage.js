@@ -11,11 +11,17 @@ export const SKINS = Object.freeze([
 ]);
 const SKIN_IDS = new Set(SKINS.map(skin => skin.id));
 const MAX_BANK = 1_000_000;
+const MAX_TEAM = 9;
 
 // The collection book: every dino form (tier) the player has ever had in the team or beaten as boss.
 function cleanSeen(seen) {
   const clean = Array.isArray(seen) ? seen.filter(tier => Number.isInteger(tier) && dinoByTier(tier)) : [];
   return [...new Set([0, ...clean])].sort((a, b) => a - b);
+}
+
+// v2.2: the team travels from level to level. null = not saved yet (older saves); the game then picks a fitting team.
+function cleanTeam(team) {
+  return Array.isArray(team) ? team.filter(tier => Number.isInteger(tier) && dinoByTier(tier)).slice(0, MAX_TEAM) : null;
 }
 
 export function skinById(id) {
@@ -24,7 +30,7 @@ export function skinById(id) {
 
 export function readProgress(raw) {
   let value; try { value = JSON.parse(raw); } catch { value = null; }
-  const result = { unlocked:1, best:{}, sound:false, bank:0, skins:['groen'], skin:'groen', seen:[0] };
+  const result = { unlocked:1, best:{}, sound:false, bank:0, skins:['groen'], skin:'groen', seen:[0], team:null };
   if (!value || typeof value !== 'object') return result;
   const unlocked = Number(value.unlocked);
   if (Number.isInteger(unlocked)) result.unlocked = Math.max(1, Math.min(100, unlocked));
@@ -35,9 +41,17 @@ export function readProgress(raw) {
   if (Number.isInteger(value.bank)) result.bank = Math.max(0, Math.min(MAX_BANK, value.bank));
   if (Array.isArray(value.skins)) result.skins = ['groen', ...new Set(value.skins.filter(id => SKIN_IDS.has(id) && id !== 'groen'))];
   if (result.skins.includes(value.skin)) result.skin = value.skin;
-  // v2 test builds kept a persistent `team`; those forms count as discovered.
-  result.seen = cleanSeen([...(Array.isArray(value.seen) ? value.seen : []), ...(Array.isArray(value.team) ? value.team : [])]);
+  result.team = cleanTeam(value.team);
+  result.seen = cleanSeen([...(Array.isArray(value.seen) ? value.seen : []), ...(result.team || [])]);
   return result;
+}
+// Stores the team as it is now (wins, losses and merges all count) and adds its forms to the collection book.
+// Returns the same object when nothing changed, so callers can skip saving.
+export function keepTeam(progress, team) {
+  const clean = cleanTeam(team) || [];
+  const same = Array.isArray(progress.team) && progress.team.length === clean.length && progress.team.every((tier, index) => tier === clean[index]);
+  const discovered = discover(progress, clean);
+  return same ? discovered : { ...discovered, team: clean };
 }
 // Returns the same object when nothing new was discovered, so callers can skip saving.
 export function discover(progress, tiers) {

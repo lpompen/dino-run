@@ -29,3 +29,28 @@
 #team-dialog .team-actions{position:sticky;bottom:-16px;background:#f7f8e9;padding-top:6px}
 @media(max-width:700px),(max-width:950px) and (orientation:portrait){#team-dialog{max-height:62dvh;padding:12px 12px 14px}#team-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 .team-open #hud .power-strip,.team-open #team-toggle,.team-open #game-hint,.team-open .touch-controls,.team-open #shield-badge{display:none!important}
+
+/* v2.2: the team travels along; the boss fight plays out in rounds with two health bars. */
+.journey em{display:block;font-style:normal;font-size:11px;color:#46705f;margin-top:4px}
+#fight{position:absolute;top:max(84px,calc(env(safe-area-inset-top) + 66px));left:50%;transform:translateX(-50%);width:min(640px,94vw);display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:end;gap:14px;background:#ffffedf0;border:1px solid #fff;border-radius:20px;padding:12px 18px 14px;box-shadow:0 6px 30px #16535022}
+.fighter{position:relative;min-width:0}
+.fighter small{display:block;font-size:9px;letter-spacing:1.4px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fighter strong{display:block;font-size:26px;line-height:1.1;margin:3px 0 7px;color:#2d7d46}
+.fighter.boss{text-align:right}
+.fighter.boss strong{color:#cd3f50}
+.fighter .hp{position:relative;height:18px;border-radius:10px;background:#1c4b3a26;overflow:hidden;box-shadow:inset 0 0 0 2px #fff}
+.fighter .hp i{position:absolute;top:0;bottom:0;left:0;width:100%;border-radius:10px}
+.fighter.boss .hp i{left:auto;right:0}
+.fighter .hp .trail{background:#ffd36b;transition:width .7s ease .35s}
+.fighter .hp .fill{background:linear-gradient(#6fdc86,#2f9a52);transition:width .22s ease-out}
+.fighter.boss .hp .fill{background:linear-gradient(#ff8a7d,#d2434e)}
+.fight-vs{font-size:22px;font-weight:900;color:#b8393e;padding-bottom:6px}
+.fighter.hit{animation:fighthit .35s}
+@keyframes fighthit{0%,100%{transform:none}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+.dmg{position:absolute;top:-10px;font-size:24px;font-weight:900;color:#d2434e;pointer-events:none;text-shadow:0 2px 0 #fff,0 0 8px #fff;animation:dmg .9s ease-out forwards}
+.fighter:not(.boss) .dmg{left:45%}
+.fighter.boss .dmg{right:45%;color:#e0851f}
+@keyframes dmg{from{opacity:1;transform:translateY(0) scale(1.25)}to{opacity:0;transform:translateY(-38px) scale(.9)}}
+.fighting #hud .power-strip,.fighting #team-toggle,.fighting #game-hint,.fighting .touch-controls,.fighting #shield-badge{display:none!important}
+@media(max-width:700px),(max-width:950px) and (orientation:portrait){#fight{top:max(74px,calc(env(safe-area-inset-top) + 58px));gap:8px;padding:10px 12px 12px}.fighter strong{font-size:20px}.fight-vs{font-size:17px}.fighter .hp{height:14px}.journey em{font-size:10px}}
+@media(prefers-reduced-motion:reduce){.fighter.hit,.dmg{animation:none}.dmg{display:none}}
